@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT config_value FROM system_config WHERE `config_key` = 'system_initialized'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "config_value",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
+          "max_size": 262140
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7a322d6949cfd1f238c73674db979804ec37098ad2628f81c58ec507366ccd57"
+}

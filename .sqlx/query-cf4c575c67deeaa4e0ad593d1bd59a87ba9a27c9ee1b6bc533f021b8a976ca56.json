@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE system_config SET config_value = 'success' WHERE config_key = 'system_initialized'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "cf4c575c67deeaa4e0ad593d1bd59a87ba9a27c9ee1b6bc533f021b8a976ca56"
+}

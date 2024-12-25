@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT SUM(uploaded_size) as total_uploaded FROM upload_progress WHERE filename = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_uploaded",
+        "type_info": {
+          "type": "NewDecimal",
+          "flags": "BINARY",
+          "max_size": 42
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "164efdd8cd4ef7aa65fa8905334861c1c7a1100579c06c80a6bef7f1bf7402b1"
+}

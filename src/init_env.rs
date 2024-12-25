@@ -3,6 +3,7 @@ use log::{info, error};
 use std::fs;
 use dotenv::dotenv;
 use std::env;
+use actix_web::{web, HttpResponse};
 
 pub async fn init_db_pool() -> MySqlPool {
     dotenv().ok(); // 加载 .env 文件
@@ -18,7 +19,13 @@ pub async fn init_db_pool() -> MySqlPool {
 }
 
 async fn ensure_system_config(pool: &MySqlPool) -> Result<(), sqlx::Error> {
-    let init_sys_sql = fs::read_to_string("init_sys.sql").expect("Failed to read init_sys.sql");
+    let init_sys_sql = match fs::read_to_string("init_sys.sql") {
+        Ok(content) => content,
+        Err(e) => {
+            error!("Failed to read init_sys.sql: {}", e);
+            return Err(sqlx::Error::RowNotFound);
+        }
+    };
     pool.execute(init_sys_sql.as_str()).await?;
     info!("System configuration ensured.");
     Ok(())
@@ -73,4 +80,61 @@ pub async fn ensure_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error>
             Ok(())
         }
     }
+}
+
+pub async fn set_system_initialized(pool: &MySqlPool) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "UPDATE system_config SET config_value = 'success' WHERE config_key = 'system_initialized'"
+    )
+    .execute(pool)
+    .await?;
+    info!("System initialized status set to success.");
+    Ok(())
+}
+
+pub async fn check_table_structure_endpoint(
+    data: web::Data<MySqlPool>,
+) -> HttpResponse {
+    match check_table_structure(&data).await {
+        Ok(_) => {
+            if let Err(e) = set_system_initialized(&data).await {
+                error!("Failed to update system_initialized status: {}", e);
+                return HttpResponse::InternalServerError().body(format!("Failed to update system_initialized status: {}", e));
+            }
+            HttpResponse::Ok().json("Table structure is as expected and system initialized status set to success.")
+        },
+        Err(e) => HttpResponse::InternalServerError().body(format!("Table structure check failed: {}", e)),
+    }
+}
+
+pub async fn ensure_table_structure_endpoint(
+    data: web::Data<MySqlPool>,
+) -> HttpResponse {
+    match ensure_table_structure(&data).await {
+        Ok(_) => {
+            if let Err(e) = set_system_initialized(&data).await {
+                error!("Failed to update system_initialized status: {}", e);
+                return HttpResponse::InternalServerError().body(format!("Failed to update system_initialized status: {}", e));
+            }
+            HttpResponse::Ok().json("Table structure is ensured using init.sql.")
+        },
+        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to ensure table structure: {}", e)),
+    }
+}
+
+pub async fn check_system_initialized(pool: &MySqlPool) -> Result<(), HttpResponse> {
+    let row = sqlx::query!("SELECT config_value FROM system_config WHERE `config_key` = 'system_initialized'")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            error!("Failed to fetch system_initialized status: {}", e);
+            HttpResponse::InternalServerError().body("Failed to fetch system status")
+        })?;
+
+    if row.config_value != "success" {
+        error!("System not initialized");
+        return Err(HttpResponse::BadRequest().body("System needs initialization"));
+    }
+
+    Ok(())
 } 

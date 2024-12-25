@@ -1,16 +1,14 @@
-mod upload;
 mod upload_metadata;
 mod init_env;
+mod upload;
 
 use actix_web::{web, App, HttpServer};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use log::{error, info};
-use std::fs;
-use upload::{upload_file, submit_file_metadata, AppState, check_table_structure_endpoint, ensure_table_structure_endpoint};
-use init_env::init_db_pool;
-use sqlx::{MySqlPool, Executor};
+use upload::{upload_file, submit_file_metadata, AppState};
+use init_env::{init_db_pool, check_table_structure_endpoint, ensure_table_structure_endpoint};
 use simplelog::*;
 use std::env;
 
@@ -19,12 +17,22 @@ async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok(); // 加载 .env 文件
 
     // 设置日志输出
-    let log_file_path = env::var("LOG_FILE_PATH").expect("LOG_FILE_PATH must be set");
+    let log_file_path = match env::var("LOG_FILE_PATH") {
+        Ok(path) => path,
+        Err(_) => {
+            error!("LOG_FILE_PATH must be set");
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "LOG_FILE_PATH not set"));
+        }
+    };
+
     CombinedLogger::init(vec![
         WriteLogger::new(
             LevelFilter::Info,
             Config::default(),
-            std::fs::File::create(log_file_path).unwrap(),
+            std::fs::File::create(&log_file_path).unwrap_or_else(|e| {
+                error!("Failed to create log file: {}", e);
+                std::process::exit(1);
+            }),
         ),
     ])
     .unwrap();
