@@ -5,27 +5,27 @@ use dotenv::dotenv;
 use std::env;
 use actix_web::{web, HttpResponse};
 
-pub async fn init_db_pool() -> MySqlPool {
+pub async fn init_db_pool() -> Result<MySqlPool, sqlx::Error> {
     dotenv().ok(); // 加载 .env 文件
 
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url = env::var("DATABASE_URL").map_err(|e| {
+        error!("DATABASE_URL must be set: {}", e);
+        sqlx::Error::Configuration(e.into())
+    })?;
 
-    let pool = MySqlPool::connect(&database_url).await.unwrap();
+    let pool = MySqlPool::connect(&database_url).await?;
 
     // 检查并初始化系统配置表
-    ensure_system_config(&pool).await.expect("Failed to ensure system config");
+    ensure_system_config(&pool).await?;
 
-    pool
+    Ok(pool)
 }
 
 async fn ensure_system_config(pool: &MySqlPool) -> Result<(), sqlx::Error> {
-    let init_sys_sql = match fs::read_to_string("init_sys.sql") {
-        Ok(content) => content,
-        Err(e) => {
-            error!("Failed to read init_sys.sql: {}", e);
-            return Err(sqlx::Error::RowNotFound);
-        }
-    };
+    let init_sys_sql = fs::read_to_string("init_sys.sql").map_err(|e| {
+        error!("Failed to read init_sys.sql: {}", e);
+        sqlx::Error::Io(e)
+    })?;
     pool.execute(init_sys_sql.as_str()).await?;
     info!("System configuration ensured.");
     Ok(())
@@ -34,8 +34,12 @@ async fn ensure_system_config(pool: &MySqlPool) -> Result<(), sqlx::Error> {
 pub async fn check_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error> {
     dotenv().ok(); // 确保环境变量已加载
 
-    let expected_columns_str = env::var("EXPECTED_COLUMNS").expect("EXPECTED_COLUMNS must be set");
-    let expected_columns: Vec<(&str, &str)> = expected_columns_str
+    // 校验 upload_file_meta 表
+    let expected_columns_upload_file_meta_str = env::var("EXPECTED_COLUMNS_UPLOAD_FILE_META").map_err(|e| {
+        error!("EXPECTED_COLUMNS_UPLOAD_FILE_META must be set: {}", e);
+        sqlx::Error::Configuration(e.into())
+    })?;
+    let expected_columns_upload_file_meta: Vec<(&str, &str)> = expected_columns_upload_file_meta_str
         .split(',')
         .map(|s| {
             let mut parts = s.split(':');
@@ -43,7 +47,30 @@ pub async fn check_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error> 
         })
         .collect();
 
-    let rows = sqlx::query("SHOW COLUMNS FROM upload_states")
+    check_table(pool, "upload_file_meta", &expected_columns_upload_file_meta).await?;
+
+    // 校验 upload_progress 表
+    let expected_columns_upload_progress_str = env::var("EXPECTED_COLUMNS_UPLOAD_PROGRESS").map_err(|e| {
+        error!("EXPECTED_COLUMNS_UPLOAD_PROGRESS must be set: {}", e);
+        sqlx::Error::Configuration(e.into())
+    })?;
+    let expected_columns_upload_progress: Vec<(&str, &str)> = expected_columns_upload_progress_str
+        .split(',')
+        .map(|s| {
+            let mut parts = s.split(':');
+            (parts.next().unwrap(), parts.next().unwrap())
+        })
+        .collect();
+
+    check_table(pool, "upload_progress", &expected_columns_upload_progress).await?;
+
+    info!("All table structures are as expected.");
+    Ok(())
+}
+
+async fn check_table(pool: &MySqlPool, table_name: &str, expected_columns: &[(&str, &str)]) -> Result<(), sqlx::Error> {
+    let query = format!("SHOW COLUMNS FROM {}", table_name);
+    let rows = sqlx::query(&query)
         .fetch_all(pool)
         .await?;
 
@@ -53,16 +80,16 @@ pub async fn check_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error> 
 
         if let Some((_, expected_type)) = expected_columns.iter().find(|(name, _)| name == &field) {
             if expected_type != &field_type {
-                error!("Column type mismatch for '{}': expected '{}', found '{}'", field, expected_type, field_type);
+                error!("Column type mismatch for '{}.{}': expected '{}', found '{}'", table_name, field, expected_type, field_type);
                 return Err(sqlx::Error::RowNotFound);
             }
         } else {
-            error!("Unexpected column '{}'", field);
+            error!("Unexpected column '{}.{}'", table_name, field);
             return Err(sqlx::Error::RowNotFound);
         }
     }
 
-    info!("Table structure is as expected.");
+    info!("Table '{}' structure is as expected.", table_name);
     Ok(())
 }
 
@@ -74,7 +101,10 @@ pub async fn ensure_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error>
         }
         Err(_) => {
             info!("Table structure is incorrect. Attempting to create the correct structure using init.sql.");
-            let init_sql = fs::read_to_string("init.sql").expect("Failed to read init.sql");
+            let init_sql = fs::read_to_string("init.sql").map_err(|e| {
+                error!("Failed to read init.sql: {}", e);
+                sqlx::Error::Io(e)
+            })?;
             pool.execute(init_sql.as_str()).await?;
             info!("Table structure created using init.sql.");
             Ok(())

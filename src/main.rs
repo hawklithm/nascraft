@@ -42,7 +42,14 @@ async fn main() -> std::io::Result<()> {
         return Err(e);
     }
 
-    let db_pool = init_db_pool().await;
+    // Initialize the database pool
+    let db_pool = match init_db_pool().await {
+        Ok(pool) => pool,
+        Err(e) => {
+            error!("Failed to initialize database pool: {}", e);
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to initialize database pool"));
+        }
+    };
 
     let app_state = Arc::new(AppState {
         uploads: Mutex::new(HashMap::new()),

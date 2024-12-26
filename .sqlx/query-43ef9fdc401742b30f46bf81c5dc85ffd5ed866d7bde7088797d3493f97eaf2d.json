@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT SUM(uploaded_size) as total_uploaded FROM upload_progress WHERE filename = ?",
+  "query": "SELECT SUM(uploaded_size) as total_uploaded FROM upload_progress WHERE file_id = ?",
   "describe": {
     "columns": [
       {
@@ -20,5 +20,5 @@
       true
     ]
   },
-  "hash": "164efdd8cd4ef7aa65fa8905334861c1c7a1100579c06c80a6bef7f1bf7402b1"
+  "hash": "43ef9fdc401742b30f46bf81c5dc85ffd5ed866d7bde7088797d3493f97eaf2d"
 }

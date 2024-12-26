@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT config_value FROM system_config WHERE config_key = 'chunk_size'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "config_value",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
+          "max_size": 262140
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "48286af3e36e0c87e3610338ad9361d5aa88cf7495506ada0ed65b1387c623e8"
+}

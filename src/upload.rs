@@ -43,6 +43,17 @@ pub async fn upload_file(
             }
         };
 
+    let start_offset = match req.headers()
+        .get("X-Start-Offset")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.parse::<u64>().ok()) {
+            Some(offset) => offset,
+            None => {
+                error!("Missing or invalid start offset");
+                return HttpResponse::BadRequest().body("Missing or invalid start offset");
+            }
+        };
+
     let record = match query!(
         "SELECT filename, checksum, total_size FROM upload_file_meta WHERE id = ?",
         file_id
@@ -89,7 +100,7 @@ pub async fn upload_file(
     };
 
     // 分片文件路径
-    let chunk_file_path = format!("uploads/{}_chunk_{}", safe_filename, start_pos);
+    let chunk_file_path = format!("uploads/{}_chunk_{}", safe_filename,start_offset);
 
     let mut file = match OpenOptions::new()
         .create(true)
@@ -104,7 +115,7 @@ pub async fn upload_file(
         };
 
     let mut hasher = Sha256::new();
-    let mut uploaded_size = start_pos;
+    let mut uploaded_size = 0;
 
     while let Some(chunk) = payload.next().await {
         let chunk = match chunk {
@@ -124,18 +135,13 @@ pub async fn upload_file(
 
         let checksum = format!("{:x}", hasher.clone().finalize());
 
-        // 更新上传进度表
+        // 更新上传进度表，仅更新 uploaded_size 和 checksum
         if let Err(e) = query!(
-            "INSERT INTO upload_progress (checksum, filename, total_size, uploaded_size, start_offset, end_offset) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE uploaded_size = ?, start_offset = ?, end_offset = ?",
+            "UPDATE upload_progress SET uploaded_size = ?, checksum = ? WHERE file_id = ? AND start_offset = ?",
+            uploaded_size,
             checksum,
-            safe_filename,
-            total_size,
-            uploaded_size,
-            start_pos,
-            end_pos,
-            uploaded_size,
-            start_pos,
-            end_pos
+            file_id,
+            start_offset
         )
         .execute(&data.db_pool)
         .await
@@ -147,8 +153,8 @@ pub async fn upload_file(
 
     // 检查所有分片是否上传完成
     let total_uploaded: u64 = query!(
-        "SELECT SUM(uploaded_size) as total_uploaded FROM upload_progress WHERE filename = ?",
-        safe_filename
+        "SELECT SUM(uploaded_size) as total_uploaded FROM upload_progress WHERE file_id = ?",
+        file_id
     )
     .fetch_one(&data.db_pool)
     .await
@@ -156,6 +162,18 @@ pub async fn upload_file(
     .unwrap_or(0);
 
     if total_uploaded >= total_size {
+        // 更新文件状态为处理中
+        if let Err(e) = query!(
+            "UPDATE upload_file_meta SET status = 1 WHERE id = ? AND status = 0",
+            file_id
+        )
+        .execute(&data.db_pool)
+        .await
+        {
+            error!("Failed to update file status to processing: {}", e);
+            return HttpResponse::InternalServerError().body(format!("Failed to update file status: {}", e));
+        }
+
         // 组合分片文件为完整文件
         let final_file_path = format!("uploads/{}", safe_filename);
         let mut final_file = match OpenOptions::new()
@@ -199,32 +217,53 @@ pub async fn upload_file(
 
         // 更新文件状态为已完成
         if let Err(e) = query!(
-            "UPDATE upload_file_meta SET status = 1 WHERE id = ?",
+            "UPDATE upload_file_meta SET status = 2 WHERE id = ? AND status = 1",
             file_id
         )
         .execute(&data.db_pool)
         .await
         {
-            error!("Failed to update file status: {}", e);
+            error!("Failed to update file status to completed: {}", e);
             return HttpResponse::InternalServerError().body(format!("Failed to update file status: {}", e));
         }
+
+        // 获取最终文件大小
+        let final_file_size = match fs::metadata(&final_file_path).await {
+            Ok(metadata) => metadata.len(),
+            Err(e) => {
+                error!("Failed to get final file size: {}", e);
+                return HttpResponse::InternalServerError().body("Failed to get final file size");
+            }
+        };
+
+        let final_checksum = format!("{:x}", hasher.finalize());
+
+        HttpResponse::Ok()
+            .content_type("application/json")
+            .json(json!({
+                "status": "success",
+                "filename": safe_filename,
+                "size": final_file_size,  // 使用最终文件大小
+                "checksum": final_checksum
+            }))
+    } else {
+        let final_checksum = format!("{:x}", hasher.finalize());
+
+        HttpResponse::Ok()
+            .content_type("application/json")
+            .json(json!({
+                "status": "range_success",
+                "filename": safe_filename,
+                "size": uploaded_size,
+                "checksum": final_checksum
+            }))
     }
-
-    let final_checksum = format!("{:x}", hasher.finalize());
-
-    HttpResponse::Ok()
-        .content_type("application/json")
-        .json(json!({
-            "status": "success",
-            "filename": safe_filename,
-            "size": uploaded_size,
-            "checksum": final_checksum
-        }))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileMetadata {
     pub filename: String,
+    pub file_id: u64,
     pub total_size: u64,
 }
 
@@ -247,6 +286,44 @@ pub async fn submit_file_metadata(
         total_size: metadata.total_size,
         checksum: String::new(),
     });
+
+    // 获取分片大小配置
+    let chunk_size: u64 = match query!(
+        "SELECT config_value FROM system_config WHERE config_key = 'chunk_size'"
+    )
+    .fetch_one(&data.db_pool)
+    .await
+    {
+        Ok(row) => row.config_value.parse().unwrap_or(1048576), // 默认1MB
+        Err(e) => {
+            error!("Failed to fetch chunk size: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to fetch chunk size");
+        }
+    };
+
+    // 计算分片数量并初始化 upload_progress 表
+    let num_chunks = (metadata.total_size + chunk_size - 1) / chunk_size;
+    for i in 0..num_chunks {
+        let start_offset = i * chunk_size;
+        let end_offset = ((i + 1) * chunk_size).min(metadata.total_size) - 1;
+
+        if let Err(e) = query!(
+            "INSERT INTO upload_progress (file_id, checksum, filename, total_size, uploaded_size, start_offset, end_offset) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            metadata.file_id, // 使用 unique_id 作为 file_id
+            "", // 初始时没有checksum
+            safe_filename,
+            metadata.total_size,
+            0, // 初始上传大小为0
+            start_offset,
+            end_offset
+        )
+        .execute(&data.db_pool)
+        .await
+        {
+            error!("Failed to initialize upload progress: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to initialize upload progress");
+        }
+    }
 
     // 保存到数据库
     let upload_state = uploads.get(&safe_filename).unwrap();

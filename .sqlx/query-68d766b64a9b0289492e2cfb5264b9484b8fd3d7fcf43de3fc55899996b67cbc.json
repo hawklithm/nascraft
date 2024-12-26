@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE upload_file_meta SET status = 2 WHERE id = ? AND status = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "68d766b64a9b0289492e2cfb5264b9484b8fd3d7fcf43de3fc55899996b67cbc"
+}
