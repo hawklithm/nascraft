@@ -93,14 +93,14 @@ pub async fn upload_file(
                 .split('-')
                 .collect();
             let start = parts[0].replace("bytes ", "").parse::<u64>().unwrap_or(0);
-            let end = parts.get(1).and_then(|&s| s.parse::<u64>().ok()).unwrap_or(total_size - 1);
+            let end = parts.get(1).and_then(|&s| s.parse::<u64>().ok()).unwrap_or(start + content_length - 1);
             (start, end)
         },
-        None => (0u64, total_size - 1)
+        None => (0u64, content_length - 1)
     };
 
     // 分片文件路径
-    let chunk_file_path = format!("uploads/{}_chunk_{}", safe_filename,start_offset);
+    let chunk_file_path = format!("uploads/{}_chunk_{}", safe_filename, start_offset);
 
     let mut file = match OpenOptions::new()
         .create(true)
@@ -114,8 +114,14 @@ pub async fn upload_file(
             }
         };
 
+    // 移动文件指针到 start_pos
+    if let Err(e) = file.seek(tokio::io::SeekFrom::Start(start_pos)).await {
+        error!("Failed to seek file: {}", e);
+        return HttpResponse::InternalServerError().body(format!("Failed to seek file: {}", e));
+    }
+
     let mut hasher = Sha256::new();
-    let mut uploaded_size = 0;
+    let mut uploaded_size = start_pos;
 
     while let Some(chunk) = payload.next().await {
         let chunk = match chunk {
@@ -126,12 +132,21 @@ pub async fn upload_file(
             }
         };
 
-        if let Err(e) = file.write_all(&chunk).await {
+        // 计算剩余需要写入的字节数
+        let remaining_bytes = content_length.saturating_sub(uploaded_size - start_pos);
+        let bytes_to_write = chunk.len().min(remaining_bytes as usize);
+
+        if let Err(e) = file.write_all(&chunk[..bytes_to_write]).await {
             error!("Write error: {}", e);
             return HttpResponse::InternalServerError().body(format!("Write error: {}", e));
         }
-        hasher.update(&chunk);
-        uploaded_size += chunk.len() as u64;
+        hasher.update(&chunk[..bytes_to_write]);
+        uploaded_size += bytes_to_write as u64;
+
+        // 如果已经写入了足够的字节数，退出循环
+        if uploaded_size - start_pos >= content_length {
+            break;
+        }
 
         let checksum = format!("{:x}", hasher.clone().finalize());
 
