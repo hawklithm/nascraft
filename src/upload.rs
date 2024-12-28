@@ -12,16 +12,27 @@ use log::error;
 use sanitize_filename::sanitize;
 use uuid::Uuid;
 use sqlx::mysql::MySqlPool;
-use crate::upload_metadata::UploadState;
 use crate::init_env::{check_table_structure_endpoint, ensure_table_structure_endpoint, check_system_initialized};
-use sqlx::query;
-use sqlx::types::BigDecimal;
-use bigdecimal::ToPrimitive;
+use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db};
 
 #[derive(Debug)]
 pub struct AppState {
     pub uploads: Mutex<HashMap<String, UploadState>>,
     pub db_pool: MySqlPool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadState {
+    pub id: String,
+    pub filename: String,
+    pub total_size: u64,
+    pub checksum: String,
+}
+
+impl UploadState {
+    pub async fn save_to_db(&self, pool: &MySqlPool) -> Result<(), String> {
+        save_upload_state_to_db(pool, &self.id, &self.filename, self.total_size, &self.checksum).await
+    }
 }
 
 pub async fn upload_file(
@@ -54,22 +65,13 @@ pub async fn upload_file(
             }
         };
 
-    let record = match query!(
-        "SELECT filename, checksum, total_size FROM upload_file_meta WHERE id = ?",
-        file_id
-    )
-    .fetch_one(&data.db_pool)
-    .await
-    {
+    let (filename, _, total_size) = match fetch_file_record(&data.db_pool, &file_id).await {
         Ok(record) => record,
-        Err(e) => {
-            error!("Failed to fetch file record: {}", e);
-            return HttpResponse::InternalServerError().body("Failed to fetch file record");
-        }
+        Err(e) => return HttpResponse::InternalServerError().body(e),
     };
 
-    let safe_filename = sanitize(&record.filename);
-    let total_size = record.total_size as u64;
+    let safe_filename = sanitize(&filename);
+    let total_size = total_size as u64;
 
     let content_length = match req.headers()
         .get(actix_web::http::header::CONTENT_LENGTH)
@@ -151,42 +153,21 @@ pub async fn upload_file(
         let checksum = format!("{:x}", hasher.clone().finalize());
 
         // 更新上传进度表，仅更新 uploaded_size 和 checksum
-        if let Err(e) = query!(
-            "UPDATE upload_progress SET uploaded_size = ?, checksum = ? WHERE file_id = ? AND start_offset = ?",
-            uploaded_size,
-            checksum,
-            file_id,
-            start_offset
-        )
-        .execute(&data.db_pool)
-        .await
-        {
-            error!("Failed to update upload progress: {}", e);
-            return HttpResponse::InternalServerError().body(format!("Failed to update upload progress: {}", e));
+        if let Err(e) = update_upload_progress(&data.db_pool, uploaded_size, &checksum, &file_id, start_offset).await {
+            return HttpResponse::InternalServerError().body(e);
         }
     }
 
     // 检查所有分片是否上传完成
-    let total_uploaded: u64 = query!(
-        "SELECT SUM(uploaded_size) as total_uploaded FROM upload_progress WHERE file_id = ?",
-        file_id
-    )
-    .fetch_one(&data.db_pool)
-    .await
-    .map(|row| row.total_uploaded.unwrap_or_else(|| BigDecimal::from(0)).to_u64().unwrap_or(0))
-    .unwrap_or(0);
+    let total_uploaded = match get_total_uploaded(&data.db_pool, &file_id).await {
+        Ok(size) => size,
+        Err(e) => return HttpResponse::InternalServerError().body(e),
+    };
 
     if total_uploaded >= total_size {
         // 更新文件状态为处理中
-        if let Err(e) = query!(
-            "UPDATE upload_file_meta SET status = 1 WHERE id = ? AND status = 0",
-            file_id
-        )
-        .execute(&data.db_pool)
-        .await
-        {
-            error!("Failed to update file status to processing: {}", e);
-            return HttpResponse::InternalServerError().body(format!("Failed to update file status: {}", e));
+        if let Err(e) = update_file_status(&data.db_pool, &file_id, 0, 1).await {
+            return HttpResponse::InternalServerError().body(e);
         }
 
         // 组合分片文件为完整文件
@@ -231,15 +212,8 @@ pub async fn upload_file(
         }
 
         // 更新文件状态为已完成
-        if let Err(e) = query!(
-            "UPDATE upload_file_meta SET status = 2 WHERE id = ? AND status = 1",
-            file_id
-        )
-        .execute(&data.db_pool)
-        .await
-        {
-            error!("Failed to update file status to completed: {}", e);
-            return HttpResponse::InternalServerError().body(format!("Failed to update file status: {}", e));
+        if let Err(e) = update_file_status(&data.db_pool, &file_id, 1, 2).await {
+            return HttpResponse::InternalServerError().body(e);
         }
 
         // 获取最终文件大小
@@ -303,17 +277,9 @@ pub async fn submit_file_metadata(
     });
 
     // 获取分片大小配置
-    let chunk_size: u64 = match query!(
-        "SELECT config_value FROM system_config WHERE config_key = 'chunk_size'"
-    )
-    .fetch_one(&data.db_pool)
-    .await
-    {
-        Ok(row) => row.config_value.parse().unwrap_or(1048576), // 默认1MB
-        Err(e) => {
-            error!("Failed to fetch chunk size: {}", e);
-            return HttpResponse::InternalServerError().body("Failed to fetch chunk size");
-        }
+    let chunk_size = match fetch_chunk_size(&data.db_pool).await {
+        Ok(size) => size,
+        Err(e) => return HttpResponse::InternalServerError().body(e),
     };
 
     // 计算分片数量并初始化 upload_progress 表
@@ -322,21 +288,8 @@ pub async fn submit_file_metadata(
         let start_offset = i * chunk_size;
         let end_offset = ((i + 1) * chunk_size).min(metadata.total_size) - 1;
 
-        if let Err(e) = query!(
-            "INSERT INTO upload_progress (file_id, checksum, filename, total_size, uploaded_size, start_offset, end_offset) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            metadata.file_id, // 使用 unique_id 作为 file_id
-            "", // 初始时没有checksum
-            safe_filename,
-            metadata.total_size,
-            0, // 初始上传大小为0
-            start_offset,
-            end_offset
-        )
-        .execute(&data.db_pool)
-        .await
-        {
-            error!("Failed to initialize upload progress: {}", e);
-            return HttpResponse::InternalServerError().body("Failed to initialize upload progress");
+        if let Err(e) = initialize_upload_progress(&data.db_pool, metadata.file_id, &safe_filename, metadata.total_size, start_offset, end_offset).await {
+            return HttpResponse::InternalServerError().body(e);
         }
     }
 

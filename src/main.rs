@@ -1,6 +1,6 @@
-mod upload_metadata;
 mod init_env;
 mod upload;
+mod upload_dao;
 
 use actix_web::{web, App, HttpServer};
 use std::sync::Arc;
