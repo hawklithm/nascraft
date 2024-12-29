@@ -252,8 +252,14 @@ pub async fn upload_file(
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileMetadata {
     pub filename: String,
-    pub file_id: u64,
     pub total_size: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChunkInfo {
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub chunk_size: u64,
 }
 
 pub async fn submit_file_metadata(
@@ -265,8 +271,8 @@ pub async fn submit_file_metadata(
     }
 
     let safe_filename = sanitize(&metadata.filename);
-
     let unique_id = Uuid::new_v4().to_string();
+    let file_id = unique_id.clone();
 
     let mut uploads = data.uploads.lock().await;
     uploads.insert(safe_filename.clone(), UploadState {
@@ -284,21 +290,35 @@ pub async fn submit_file_metadata(
 
     // 计算分片数量并初始化 upload_progress 表
     let num_chunks = (metadata.total_size + chunk_size - 1) / chunk_size;
+    let mut chunks = Vec::new();
+
     for i in 0..num_chunks {
         let start_offset = i * chunk_size;
         let end_offset = ((i + 1) * chunk_size).min(metadata.total_size) - 1;
 
-        if let Err(e) = initialize_upload_progress(&data.db_pool, metadata.file_id, &safe_filename, metadata.total_size, start_offset, end_offset).await {
+        if let Err(e) = initialize_upload_progress(&data.db_pool, &file_id, &safe_filename, metadata.total_size, start_offset, end_offset).await {
             return HttpResponse::InternalServerError().body(e);
         }
+
+        chunks.push(ChunkInfo {
+            start_offset,
+            end_offset,
+            chunk_size: end_offset - start_offset + 1,
+        });
     }
 
     // 保存到数据库
     let upload_state = uploads.get(&safe_filename).unwrap();
-    upload_state.save_to_db(&data.db_pool).await.unwrap();
+    if let Err(e) = upload_state.save_to_db(&data.db_pool).await {
+        return HttpResponse::InternalServerError().body(e);
+    }
 
     HttpResponse::Ok().json(json!({
         "message": "Metadata submitted successfully",
-        "id": unique_id
+        "id": unique_id,
+        "total_size": metadata.total_size,
+        "chunk_size": chunk_size,
+        "total_chunks": num_chunks,
+        "chunks": chunks
     }))
 }

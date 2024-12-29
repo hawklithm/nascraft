@@ -86,7 +86,7 @@ pub async fn fetch_chunk_size(db_pool: &MySqlPool) -> Result<u64, String> {
 
 pub async fn initialize_upload_progress(
     db_pool: &MySqlPool,
-    file_id: u64,
+    file_id: &str,
     safe_filename: &str,
     total_size: u64,
     start_offset: u64,
