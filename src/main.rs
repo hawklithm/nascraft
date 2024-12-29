@@ -11,6 +11,7 @@ use upload::{upload_file, submit_file_metadata, AppState};
 use init_env::{init_db_pool, check_table_structure_endpoint, ensure_table_structure_endpoint};
 use simplelog::*;
 use std::env;
+use std::path::{Path, PathBuf};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -24,6 +25,20 @@ async fn main() -> std::io::Result<()> {
             return Err(std::io::Error::new(std::io::ErrorKind::Other, "LOG_FILE_PATH not set"));
         }
     };
+
+    // 确保日志目录存在
+    let log_path = Path::new(&log_file_path);
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // 获取日志文件的绝对路径
+    let absolute_log_path = std::env::current_dir()?
+        .join(log_path)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&log_file_path));
+    
+    println!("Log file absolute path: {}", absolute_log_path.display());
 
     CombinedLogger::init(vec![
         WriteLogger::new(

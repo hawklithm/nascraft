@@ -35,13 +35,44 @@ impl UploadState {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct ApiResponse<T> {
+    message: String,
+    status: i32,
+    code: String,
+    data: Option<T>,
+}
+
+impl<T> ApiResponse<T> {
+    fn success(message: &str, data: T) -> Self {
+        Self {
+            message: message.to_string(),
+            status: 1,
+            code: "0".to_string(),
+            data: Some(data),
+        }
+    }
+
+    fn error(message: &str, code: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            status: 0,
+            code: code.to_string(),
+            data: None,
+        }
+    }
+}
+
 pub async fn upload_file(
     req: HttpRequest,
     mut payload: web::Payload,
     data: web::Data<Arc<AppState>>,
 ) -> HttpResponse {
     if let Err(response) = check_system_initialized(&data.db_pool).await {
-        return response;
+        return HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+            "System not initialized",
+            "SYSTEM_NOT_INITIALIZED"
+        ));
     }
 
     let file_id = match req.headers()
@@ -49,8 +80,10 @@ pub async fn upload_file(
         .and_then(|h| h.to_str().ok()) {
             Some(id) => id.to_string(),
             None => {
-                error!("Missing file ID");
-                return HttpResponse::BadRequest().body("Missing file ID");
+                return HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+                    "Missing file ID",
+                    "MISSING_FILE_ID"
+                ));
             }
         };
 
@@ -171,44 +204,8 @@ pub async fn upload_file(
         }
 
         // 组合分片文件为完整文件
-        let final_file_path = format!("uploads/{}", safe_filename);
-        let mut final_file = match OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&final_file_path)
-            .await
-        {
-            Ok(file) => file,
-            Err(e) => {
-                error!("Failed to create final file: {}", e);
-                return HttpResponse::InternalServerError().body("Failed to create final file");
-            }
-        };
-
-        for start in (0..total_size).step_by(1024 * 1024) { // 假设每个分片大小为1MB
-            let chunk_file_path = format!("uploads/{}_chunk_{}", safe_filename, start);
-            let mut chunk_file = match OpenOptions::new()
-                .read(true)
-                .open(&chunk_file_path)
-                .await
-            {
-                Ok(file) => file,
-                Err(e) => {
-                    error!("Failed to open chunk file: {}", e);
-                    return HttpResponse::InternalServerError().body("Failed to open chunk file");
-                }
-            };
-
-            if let Err(e) = tokio::io::copy(&mut chunk_file, &mut final_file).await {
-                error!("Failed to copy chunk to final file: {}", e);
-                return HttpResponse::InternalServerError().body("Failed to copy chunk to final file");
-            }
-
-            // 删除分片文件
-            if let Err(e) = fs::remove_file(&chunk_file_path).await {
-                error!("Failed to delete chunk file: {}", e);
-                return HttpResponse::InternalServerError().body("Failed to delete chunk file");
-            }
+        if let Err(e) = merge_chunks(&safe_filename, total_size).await {
+            return HttpResponse::InternalServerError().body(e);
         }
 
         // 更新文件状态为已完成
@@ -216,36 +213,29 @@ pub async fn upload_file(
             return HttpResponse::InternalServerError().body(e);
         }
 
-        // 获取最终文件大小
-        let final_file_size = match fs::metadata(&final_file_path).await {
-            Ok(metadata) => metadata.len(),
-            Err(e) => {
-                error!("Failed to get final file size: {}", e);
-                return HttpResponse::InternalServerError().body("Failed to get final file size");
-            }
-        };
-
         let final_checksum = format!("{:x}", hasher.finalize());
 
-        HttpResponse::Ok()
-            .content_type("application/json")
-            .json(json!({
+        HttpResponse::Ok().json(ApiResponse::success(
+            "File upload completed successfully",
+            json!({
                 "status": "success",
                 "filename": safe_filename,
-                "size": final_file_size,  // 使用最终文件大小
+                "size": total_size,
                 "checksum": final_checksum
-            }))
+            })
+        ))
     } else {
         let final_checksum = format!("{:x}", hasher.finalize());
 
-        HttpResponse::Ok()
-            .content_type("application/json")
-            .json(json!({
+        HttpResponse::Ok().json(ApiResponse::success(
+            "Chunk upload successful",
+            json!({
                 "status": "range_success",
                 "filename": safe_filename,
                 "size": uploaded_size,
                 "checksum": final_checksum
-            }))
+            })
+        ))
     }
 }
 
@@ -267,7 +257,10 @@ pub async fn submit_file_metadata(
     data: web::Data<Arc<AppState>>,
 ) -> HttpResponse {
     if let Err(response) = check_system_initialized(&data.db_pool).await {
-        return response;
+        return HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+            "System not initialized",
+            "SYSTEM_NOT_INITIALIZED"
+        ));
     }
 
     let safe_filename = sanitize(&metadata.filename);
@@ -275,12 +268,12 @@ pub async fn submit_file_metadata(
     let file_id = unique_id.clone();
 
     let mut uploads = data.uploads.lock().await;
-    uploads.insert(safe_filename.clone(), UploadState {
+    let upload_state = UploadState {
         id: unique_id.clone(),
         filename: safe_filename.clone(),
         total_size: metadata.total_size,
         checksum: String::new(),
-    });
+    };
 
     // 获取分片大小配置
     let chunk_size = match fetch_chunk_size(&data.db_pool).await {
@@ -308,17 +301,66 @@ pub async fn submit_file_metadata(
     }
 
     // 保存到数据库
-    let upload_state = uploads.get(&safe_filename).unwrap();
     if let Err(e) = upload_state.save_to_db(&data.db_pool).await {
-        return HttpResponse::InternalServerError().body(e);
+        return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            &e,
+            "DB_SAVE_ERROR"
+        ));
     }
 
-    HttpResponse::Ok().json(json!({
-        "message": "Metadata submitted successfully",
-        "id": unique_id,
-        "total_size": metadata.total_size,
-        "chunk_size": chunk_size,
-        "total_chunks": num_chunks,
-        "chunks": chunks
-    }))
+    // 保存到内存中的状态
+    uploads.insert(safe_filename.clone(), upload_state);
+
+    HttpResponse::Ok().json(ApiResponse::success(
+        "Metadata submitted successfully",
+        json!({
+            "id": unique_id,
+            "total_size": metadata.total_size,
+            "chunk_size": chunk_size,
+            "total_chunks": num_chunks,
+            "chunks": chunks
+        })
+    ))
+}
+
+// 新增辅助函数
+async fn merge_chunks(filename: &str, total_size: u64) -> Result<(), String> {
+    let final_file_path = format!("uploads/{}", filename);
+    let mut final_file = match OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&final_file_path)
+        .await {
+            Ok(file) => file,
+            Err(e) => {
+                error!("Failed to create final file: {}", e);
+                return Err("Failed to create final file".to_string());
+            }
+        };
+
+    for start in (0..total_size).step_by(1024 * 1024) {
+        let chunk_file_path = format!("uploads/{}_chunk_{}", filename, start);
+        let mut chunk_file = match OpenOptions::new()
+            .read(true)
+            .open(&chunk_file_path)
+            .await {
+                Ok(file) => file,
+                Err(e) => {
+                    error!("Failed to open chunk file: {}", e);
+                    return Err("Failed to open chunk file".to_string());
+                }
+            };
+
+        if let Err(e) = tokio::io::copy(&mut chunk_file, &mut final_file).await {
+            error!("Failed to copy chunk to final file: {}", e);
+            return Err("Failed to copy chunk to final file".to_string());
+        }
+
+        if let Err(e) = fs::remove_file(&chunk_file_path).await {
+            error!("Failed to delete chunk file: {}", e);
+            return Err("Failed to delete chunk file".to_string());
+        }
+    }
+
+    Ok(())
 }

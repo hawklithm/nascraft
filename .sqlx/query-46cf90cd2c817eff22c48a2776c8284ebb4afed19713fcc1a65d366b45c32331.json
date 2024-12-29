@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT filename, checksum, total_size FROM upload_file_meta WHERE id = ?",
+  "query": "SELECT filename, checksum, total_size FROM upload_file_meta WHERE file_id = ?",
   "describe": {
     "columns": [
       {
@@ -40,5 +40,5 @@
       false
     ]
   },
-  "hash": "e4743cdacbc21ce23d9bd46c89c616e70aa837455db52ebe950c6aeed1c36881"
+  "hash": "46cf90cd2c817eff22c48a2776c8284ebb4afed19713fcc1a65d366b45c32331"
 }

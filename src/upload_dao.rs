@@ -6,7 +6,7 @@ use bigdecimal::ToPrimitive;
 
 pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(String, String, i64), String> {
     match query!(
-        "SELECT filename, checksum, total_size FROM upload_file_meta WHERE id = ?",
+        "SELECT filename, checksum, total_size FROM upload_file_meta WHERE file_id = ?",
         file_id
     )
     .fetch_one(db_pool)
@@ -55,7 +55,7 @@ pub async fn get_total_uploaded(db_pool: &MySqlPool, file_id: &str) -> Result<u6
 
 pub async fn update_file_status(db_pool: &MySqlPool, file_id: &str, current_status: i32, new_status: i32) -> Result<(), String> {
     if let Err(e) = query!(
-        "UPDATE upload_file_meta SET status = ? WHERE id = ? AND status = ?",
+        "UPDATE upload_file_meta SET status = ? WHERE file_id = ? AND status = ?",
         new_status,
         file_id,
         current_status
@@ -119,7 +119,7 @@ pub async fn save_upload_state_to_db(
     checksum: &str,
 ) -> Result<(), String> {
     if let Err(e) = query!(
-        "INSERT INTO upload_file_meta (id, filename, total_size, checksum) VALUES (?, ?, ?, ?)",
+        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum) VALUES (?, ?, ?, ?)",
         id,
         filename,
         total_size,

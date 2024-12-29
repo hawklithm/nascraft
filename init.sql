@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS upload_file_meta (
 -- 创建上传进度表
 CREATE TABLE IF NOT EXISTS upload_progress (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    file_id VARCHAR(36) NOT NULL,
+    file_id VARCHAR(255) NOT NULL,
     checksum VARCHAR(64) NOT NULL,
     filename VARCHAR(255) NOT NULL,
     total_size BIGINT NOT NULL,

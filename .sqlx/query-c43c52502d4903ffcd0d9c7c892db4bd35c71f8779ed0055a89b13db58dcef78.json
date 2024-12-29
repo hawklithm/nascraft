@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "c43c52502d4903ffcd0d9c7c892db4bd35c71f8779ed0055a89b13db58dcef78"
+}
