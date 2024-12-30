@@ -37,8 +37,14 @@ Nascraft is a web application designed to handle file uploads efficiently using 
    Create a `.env` file in the project root with the following variables:
 
    ```env
+   # Database Configuration
    DATABASE_URL=mysql://user:password@localhost/nascraft
    LOG_FILE_PATH=logs/nascraft.log
+   SQLX_OFFLINE=true
+
+   # Table Structure Configuration
+   EXPECTED_COLUMNS_UPLOAD_FILE_META=id:bigint,file_id:varchar,filename:varchar,total_size:bigint,checksum:varchar,status:int
+   EXPECTED_COLUMNS_UPLOAD_PROGRESS=id:bigint,file_id:varchar,checksum:varchar,filename:varchar,total_size:bigint,uploaded_size:bigint,start_offset:bigint,end_offset:bigint,last_updated:timestamp
    ```
 
 4. Build and run the application:
@@ -76,6 +82,8 @@ All API endpoints return responses in the following format:
 - `"DB_SAVE_ERROR"`: Database operation failed
 - `"MERGE_CHUNKS_ERROR"`: Error while merging file chunks
 - `"UPLOAD_ERROR"`: General upload error
+- `"SYSTEM_INIT_ERROR"`: Failed to initialize system status
+- `"TABLE_STRUCTURE_ERROR"`: Database table structure error
 
 ### API Endpoints
 
@@ -164,6 +172,63 @@ All API endpoints return responses in the following format:
 }
 ```
 
+#### `/check_table_structure`
+
+**Description**: Check if the database tables have the correct structure.
+
+**Request**:
+- Method: GET
+
+**Success Response**:
+```json
+{
+    "message": "Table structure is as expected and system initialized status set to success.",
+    "status": 1,
+    "code": "0",
+    "data": null
+}
+```
+
+**Error Response**:
+```json
+{
+    "message": "Table structure check failed with errors.",
+    "status": 0,
+    "code": "TABLE_STRUCTURE_ERROR",
+    "data": [
+        "Error checking 'upload_file_meta': Table 'upload_file_meta' does not exist",
+        "Error checking 'upload_progress': Column type mismatch for 'upload_progress', field 'checksum': expected 'varchar', found 'text'"
+    ]
+}
+```
+
+#### `/ensure_table_structure`
+
+**Description**: Ensure database tables are created with the correct structure.
+
+**Request**:
+- Method: GET
+
+**Success Response**:
+```json
+{
+    "message": "Table structure is ensured using init.sql.",
+    "status": 1,
+    "code": "0",
+    "data": null
+}
+```
+
+**Error Response**:
+```json
+{
+    "message": "Failed to ensure table structure: [error details]",
+    "status": 0,
+    "code": "TABLE_STRUCTURE_ERROR",
+    "data": null
+}
+```
+
 ### Example Usage
 
 1. Submit file metadata:
@@ -193,3 +258,38 @@ To run the tests, use the following command:
 ```bash
 cargo test
 ```
+
+### Configuration
+
+The application requires several environment variables to be set in a `.env` file:
+
+#### Required Environment Variables
+
+```env
+# Database Configuration
+DATABASE_URL=mysql://user:password@localhost/nascraft
+LOG_FILE_PATH=logs/nascraft.log
+SQLX_OFFLINE=true
+
+# Table Structure Configuration
+EXPECTED_COLUMNS_UPLOAD_FILE_META=id:bigint,file_id:varchar,filename:varchar,total_size:bigint,checksum:varchar,status:int
+EXPECTED_COLUMNS_UPLOAD_PROGRESS=id:bigint,file_id:varchar,checksum:varchar,filename:varchar,total_size:bigint,uploaded_size:bigint,start_offset:bigint,end_offset:bigint,last_updated:timestamp
+```
+
+#### Environment Variables Description
+
+- **Database Configuration**
+  - `DATABASE_URL`: MySQL database connection string
+  - `LOG_FILE_PATH`: Path where application logs will be written
+  - `SQLX_OFFLINE`: Enable SQLx offline mode
+
+- **Table Structure Configuration**
+  - `EXPECTED_COLUMNS_UPLOAD_FILE_META`: Defines the expected structure of the `upload_file_meta` table
+    - Required columns: `id`, `file_id`, `filename`, `total_size`, `checksum`, `status`
+    - Each column is defined in format: `column_name:column_type`
+  
+  - `EXPECTED_COLUMNS_UPLOAD_PROGRESS`: Defines the expected structure of the `upload_progress` table
+    - Required columns: `id`, `file_id`, `checksum`, `filename`, `total_size`, `uploaded_size`, `start_offset`, `end_offset`, `last_updated`
+    - Each column is defined in format: `column_name:column_type`
+
+The application will validate the database table structure against these configurations during startup and when the `/check_table_structure` endpoint is called.

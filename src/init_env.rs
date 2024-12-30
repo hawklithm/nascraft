@@ -4,6 +4,36 @@ use std::fs;
 use dotenv::dotenv;
 use std::env;
 use actix_web::{web, HttpResponse};
+use serde::Serialize;
+use std::borrow::Cow;
+
+#[derive(Debug, Serialize)]
+struct ApiResponse<T> {
+    message: String,
+    status: i32,
+    code: String,
+    data: Option<T>,
+}
+
+impl<T> ApiResponse<T> {
+    fn success(message: &str, data: Option<T>) -> Self {
+        Self {
+            message: message.to_string(),
+            status: 1,
+            code: "0".to_string(),
+            data,
+        }
+    }
+
+    fn error(message: &str, code: &str, data: Option<T>) -> Self {
+        Self {
+            message: message.to_string(),
+            status: 0,
+            code: code.to_string(),
+            data,
+        }
+    }
+}
 
 pub async fn init_db_pool() -> Result<MySqlPool, sqlx::Error> {
     dotenv().ok(); // 加载 .env 文件
@@ -31,8 +61,10 @@ async fn ensure_system_config(pool: &MySqlPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-pub async fn check_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error> {
+pub async fn check_table_structure(pool: &MySqlPool) -> Result<Vec<String>, sqlx::Error> {
     dotenv().ok(); // 确保环境变量已加载
+
+    let mut errors = Vec::new(); // 用于收集错误信息
 
     // 校验 upload_file_meta 表
     let expected_columns_upload_file_meta_str = env::var("EXPECTED_COLUMNS_UPLOAD_FILE_META").map_err(|e| {
@@ -41,13 +73,18 @@ pub async fn check_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error> 
     })?;
     let expected_columns_upload_file_meta: Vec<(&str, &str)> = expected_columns_upload_file_meta_str
         .split(',')
-        .map(|s| {
+        .filter_map(|s| {
             let mut parts = s.split(':');
-            (parts.next().unwrap(), parts.next().unwrap())
+            match (parts.next(), parts.next()) {
+                (Some(name), Some(type_)) => Some((name, type_)),
+                _ => None,
+            }
         })
         .collect();
 
-    check_table(pool, "upload_file_meta", &expected_columns_upload_file_meta).await?;
+    if let Err(e) = check_table(pool, "upload_file_meta", &expected_columns_upload_file_meta).await {
+        errors.push(format!("Error checking 'upload_file_meta': {}", e));
+    }
 
     // 校验 upload_progress 表
     let expected_columns_upload_progress_str = env::var("EXPECTED_COLUMNS_UPLOAD_PROGRESS").map_err(|e| {
@@ -56,35 +93,84 @@ pub async fn check_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error> 
     })?;
     let expected_columns_upload_progress: Vec<(&str, &str)> = expected_columns_upload_progress_str
         .split(',')
-        .map(|s| {
+        .filter_map(|s| {
             let mut parts = s.split(':');
-            (parts.next().unwrap(), parts.next().unwrap())
+            match (parts.next(), parts.next()) {
+                (Some(name), Some(type_)) => Some((name, type_)),
+                _ => None,
+            }
         })
         .collect();
 
-    check_table(pool, "upload_progress", &expected_columns_upload_progress).await?;
+    if let Err(e) = check_table(pool, "upload_progress", &expected_columns_upload_progress).await {
+        errors.push(format!("Error checking 'upload_progress': {}", e));
+    }
 
-    info!("All table structures are as expected.");
-    Ok(())
+    if errors.is_empty() {
+        info!("All table structures are as expected.");
+        Ok(vec![]) // 返回空的错误信息
+    } else {
+        Ok(errors)
+    }
 }
 
 async fn check_table(pool: &MySqlPool, table_name: &str, expected_columns: &[(&str, &str)]) -> Result<(), sqlx::Error> {
     let query = format!("SHOW COLUMNS FROM {}", table_name);
-    let rows = sqlx::query(&query)
-        .fetch_all(pool)
-        .await?;
+    let rows = match sqlx::query(&query).fetch_all(pool).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            if let sqlx::Error::Database(db_err) = &e {
+                if db_err.code() == Some(std::borrow::Cow::Borrowed("42S02")) { // MySQL error code for table not found
+                    error!("Table '{}' does not exist", table_name);
+                    return Err(sqlx::Error::RowNotFound);
+                }
+            }
+            return Err(e);
+        }
+    };
 
-    for row in rows {
-        let field: &str = row.get("Field");
-        let field_type: &str = row.get("Type");
+    // First check for type mismatches
+    for row in &rows {
+        let field: Cow<str> = match row.try_get::<Cow<str>, _>("Field") {
+            Ok(val) => val,
+            Err(e) => {
+                error!("Failed to get 'Field' from row: {}", e);
+                return Err(e);
+            }
+        };
+        
+        let field_type: Cow<str> = match row.try_get::<Vec<u8>, _>("Type") {
+            Ok(val) => String::from_utf8(val).map(Cow::Owned).map_err(|e| {
+                error!("Failed to convert 'Type' from Vec<u8> to String: {}", e);
+                sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })?,
+            Err(e) => {
+                error!("Failed to get 'Type' from row: {}", e);
+                return Err(e);
+            }
+        };
 
         if let Some((_, expected_type)) = expected_columns.iter().find(|(name, _)| name == &field) {
-            if expected_type != &field_type {
-                error!("Column type mismatch for '{}.{}': expected '{}', found '{}'", table_name, field, expected_type, field_type);
+            if !field_type.starts_with(&expected_type.to_lowercase()) {
+                error!("Column type mismatch for table '{}', field '{}': expected '{}', found '{}'", 
+                    table_name, field, expected_type, field_type);
                 return Err(sqlx::Error::RowNotFound);
+            } else {
+                info!("Column '{}' in table '{}' is valid with type '{}'", field, table_name, field_type);
             }
         } else {
-            error!("Unexpected column '{}.{}'", table_name, field);
+            error!("Unexpected column in table '{}': '{}'", table_name, field);
+            return Err(sqlx::Error::RowNotFound);
+        }
+    }
+
+    // Then check for missing columns
+    for (expected_field, _) in expected_columns {
+        if !rows.iter().any(|row| {
+            let field: Cow<str> = row.get("Field");
+            field == *expected_field
+        }) {
+            error!("Missing column '{}' in table '{}'", expected_field, table_name);
             return Err(sqlx::Error::RowNotFound);
         }
     }
@@ -126,14 +212,33 @@ pub async fn check_table_structure_endpoint(
     data: web::Data<MySqlPool>,
 ) -> HttpResponse {
     match check_table_structure(&data).await {
-        Ok(_) => {
-            if let Err(e) = set_system_initialized(&data).await {
-                error!("Failed to update system_initialized status: {}", e);
-                return HttpResponse::InternalServerError().body(format!("Failed to update system_initialized status: {}", e));
+        Ok(errors) => {
+            if errors.is_empty() {
+                if let Err(e) = set_system_initialized(&data).await {
+                    error!("Failed to update system_initialized status: {}", e);
+                    return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                        &format!("Failed to update system_initialized status: {}", e),
+                        "SYSTEM_INIT_ERROR",
+                        None
+                    ));
+                }
+                HttpResponse::Ok().json(ApiResponse::<()>::success(
+                    "Table structure is as expected and system initialized status set to success.",
+                    None
+                ))
+            } else {
+                HttpResponse::Ok().json(ApiResponse::<Vec<String>>::error(
+                    "Table structure check failed with errors.",
+                    "TABLE_STRUCTURE_ERROR",
+                    Some(errors)
+                ))
             }
-            HttpResponse::Ok().json("Table structure is as expected and system initialized status set to success.")
         },
-        Err(e) => HttpResponse::InternalServerError().body(format!("Table structure check failed: {}", e)),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            &format!("Table structure check failed: {}", e),
+            "TABLE_STRUCTURE_ERROR",
+            None
+        )),
     }
 }
 
@@ -144,11 +249,22 @@ pub async fn ensure_table_structure_endpoint(
         Ok(_) => {
             if let Err(e) = set_system_initialized(&data).await {
                 error!("Failed to update system_initialized status: {}", e);
-                return HttpResponse::InternalServerError().body(format!("Failed to update system_initialized status: {}", e));
+                return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                    &format!("Failed to update system_initialized status: {}", e),
+                    "SYSTEM_INIT_ERROR",
+                    None
+                ));
             }
-            HttpResponse::Ok().json("Table structure is ensured using init.sql.")
+            HttpResponse::Ok().json(ApiResponse::<()>::success(
+                "Table structure is ensured using init.sql.",
+                None
+            ))
         },
-        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to ensure table structure: {}", e)),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            &format!("Failed to ensure table structure: {}", e),
+            "TABLE_STRUCTURE_ERROR",
+            None
+        )),
     }
 }
 

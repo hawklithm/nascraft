@@ -7,7 +7,7 @@ USE nascraft;
 CREATE TABLE IF NOT EXISTS system_config (
     id INT AUTO_INCREMENT PRIMARY KEY,
     config_key VARCHAR(255) NOT NULL UNIQUE,
-    config_value TEXT NOT NULL
+    config_value VARCHAR(2048) NOT NULL
 );
 
 -- 初始化系统配置表
