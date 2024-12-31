@@ -81,7 +81,7 @@ async fn main() -> std::io::Result<()> {
             .route("/upload", web::post().to(upload_file))
             .route("/submit_metadata", web::post().to(submit_file_metadata))
             .route("/check_table_structure", web::get().to(check_table_structure_endpoint))
-            .route("/ensure_table_structure", web::get().to(ensure_table_structure_endpoint))
+            .route("/ensure_table_structure", web::post().to(ensure_table_structure_endpoint))
             // 其他路由保持不变
     })
     .bind("127.0.0.1:8080")?

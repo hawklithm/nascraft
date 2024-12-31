@@ -36,7 +36,7 @@ impl<T> ApiResponse<T> {
 }
 
 pub async fn init_db_pool() -> Result<MySqlPool, sqlx::Error> {
-    dotenv().ok(); // 加载 .env 文件
+    dotenv().ok(); // Load .env file
 
     let database_url = env::var("DATABASE_URL").map_err(|e| {
         error!("DATABASE_URL must be set: {}", e);
@@ -45,28 +45,34 @@ pub async fn init_db_pool() -> Result<MySqlPool, sqlx::Error> {
 
     let pool = MySqlPool::connect(&database_url).await?;
 
-    // 检查并初始化系统配置表
+    // Ensure system configuration table
     ensure_system_config(&pool).await?;
 
     Ok(pool)
 }
 
 async fn ensure_system_config(pool: &MySqlPool) -> Result<(), sqlx::Error> {
-    let init_sys_sql = fs::read_to_string("init_sys.sql").map_err(|e| {
-        error!("Failed to read init_sys.sql: {}", e);
-        sqlx::Error::Io(e)
-    })?;
-    pool.execute(init_sys_sql.as_str()).await?;
+    execute_sql_script(pool, "init_sys.sql").await?;
     info!("System configuration ensured.");
     Ok(())
 }
 
+async fn execute_sql_script(pool: &MySqlPool, script_path: &str) -> Result<(), sqlx::Error> {
+    let sql = fs::read_to_string(script_path).map_err(|e| {
+        error!("Failed to read {}: {}", script_path, e);
+        sqlx::Error::Io(e)
+    })?;
+    pool.execute(sql.as_str()).await?;
+    info!("Executed SQL script: {}", script_path);
+    Ok(())
+}
+
 pub async fn check_table_structure(pool: &MySqlPool) -> Result<Vec<String>, sqlx::Error> {
-    dotenv().ok(); // 确保环境变量已加载
+    dotenv().ok(); // Ensure environment variables are loaded
 
-    let mut errors = Vec::new(); // 用于收集错误信息
+    let mut errors = Vec::new(); // Collect error messages
 
-    // 校验 upload_file_meta 表
+    // Check upload_file_meta table
     let expected_columns_upload_file_meta_str = env::var("EXPECTED_COLUMNS_UPLOAD_FILE_META").map_err(|e| {
         error!("EXPECTED_COLUMNS_UPLOAD_FILE_META must be set: {}", e);
         sqlx::Error::Configuration(e.into())
@@ -86,7 +92,7 @@ pub async fn check_table_structure(pool: &MySqlPool) -> Result<Vec<String>, sqlx
         errors.push(format!("Error checking 'upload_file_meta': {}", e));
     }
 
-    // 校验 upload_progress 表
+    // Check upload_progress table
     let expected_columns_upload_progress_str = env::var("EXPECTED_COLUMNS_UPLOAD_PROGRESS").map_err(|e| {
         error!("EXPECTED_COLUMNS_UPLOAD_PROGRESS must be set: {}", e);
         sqlx::Error::Configuration(e.into())
@@ -108,7 +114,7 @@ pub async fn check_table_structure(pool: &MySqlPool) -> Result<Vec<String>, sqlx
 
     if errors.is_empty() {
         info!("All table structures are as expected.");
-        Ok(vec![]) // 返回空的错误信息
+        Ok(vec![]) // Return empty error list
     } else {
         Ok(errors)
     }
@@ -181,18 +187,18 @@ async fn check_table(pool: &MySqlPool, table_name: &str, expected_columns: &[(&s
 
 pub async fn ensure_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error> {
     match check_table_structure(pool).await {
-        Ok(_) => {
-            info!("Table structure is correct.");
+        Ok(errors) => {
+            if !errors.is_empty() {
+                info!("Table structure is incorrect. Attempting to create the correct structure using init.sql.");
+                execute_sql_script(pool, "init.sql").await?;
+            } else {
+                info!("Table structure is correct.");
+            }
             Ok(())
         }
         Err(_) => {
-            info!("Table structure is incorrect. Attempting to create the correct structure using init.sql.");
-            let init_sql = fs::read_to_string("init.sql").map_err(|e| {
-                error!("Failed to read init.sql: {}", e);
-                sqlx::Error::Io(e)
-            })?;
-            pool.execute(init_sql.as_str()).await?;
-            info!("Table structure created using init.sql.");
+            info!("Table structure check failed. Attempting to create the correct structure using init.sql.");
+            execute_sql_script(pool, "init.sql").await?;
             Ok(())
         }
     }
