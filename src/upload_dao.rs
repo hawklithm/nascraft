@@ -3,6 +3,8 @@ use sqlx::query;
 use log::error;
 use sqlx::types::BigDecimal;
 use bigdecimal::ToPrimitive;
+use log::info;
+use sqlx::{Transaction, MySql};
 
 pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(String, String, i64), String> {
     match query!(
@@ -113,14 +115,14 @@ pub async fn initialize_upload_progress(
 
 pub async fn save_upload_state_to_db(
     pool: &MySqlPool,
-    id: &str,
+    file_id: &str,
     filename: &str,
     total_size: u64,
     checksum: &str,
 ) -> Result<(), String> {
     if let Err(e) = query!(
         "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum) VALUES (?, ?, ?, ?)",
-        id,
+        file_id,
         filename,
         total_size,
         checksum
@@ -131,5 +133,7 @@ pub async fn save_upload_state_to_db(
         error!("Failed to save upload state: {}", e);
         return Err("Failed to save upload state".to_string());
     }
+    info!("Successfully saved upload state for file '{}', ID: '{}'", filename, file_id);
+
     Ok(())
 }

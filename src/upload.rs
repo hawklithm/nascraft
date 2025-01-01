@@ -31,7 +31,7 @@ pub struct UploadState {
 
 impl UploadState {
     pub async fn save_to_db(&self, pool: &MySqlPool) -> Result<(), String> {
-        save_upload_state_to_db(pool, &self.id, &self.filename, self.total_size, &self.checksum).await
+        save_upload_state_to_db(pool, &self.id, &self.filename, self.total_size, &self.checksum ).await
     }
 }
 
@@ -275,13 +275,21 @@ pub async fn submit_file_metadata(
         checksum: String::new(),
     };
 
-    // 获取分片大小配置
+    // Save to database
+    if let Err(e) = upload_state.save_to_db(&data.db_pool).await {
+        return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            &e,
+            "DB_SAVE_ERROR"
+        ));
+    }
+
+    // Get chunk size configuration
     let chunk_size = match fetch_chunk_size(&data.db_pool).await {
         Ok(size) => size,
         Err(e) => return HttpResponse::InternalServerError().body(e),
     };
 
-    // 计算分片数量并初始化 upload_progress 表
+    // Calculate number of chunks and initialize upload_progress table
     let num_chunks = (metadata.total_size + chunk_size - 1) / chunk_size;
     let mut chunks = Vec::new();
 
@@ -300,15 +308,7 @@ pub async fn submit_file_metadata(
         });
     }
 
-    // 保存到数据库
-    if let Err(e) = upload_state.save_to_db(&data.db_pool).await {
-        return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
-            &e,
-            "DB_SAVE_ERROR"
-        ));
-    }
-
-    // 保存到内存中的状态
+    // Save to in-memory state
     uploads.insert(safe_filename.clone(), upload_state);
 
     HttpResponse::Ok().json(ApiResponse::success(
