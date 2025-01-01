@@ -274,18 +274,18 @@ pub async fn ensure_table_structure_endpoint(
     }
 }
 
-pub async fn check_system_initialized(pool: &MySqlPool) -> Result<(), HttpResponse> {
+pub async fn check_system_initialized(pool: &MySqlPool) -> Result<(), bool> {
     let row = sqlx::query!("SELECT config_value FROM system_config WHERE `config_key` = 'system_initialized'")
         .fetch_one(pool)
         .await
         .map_err(|e| {
             error!("Failed to fetch system_initialized status: {}", e);
-            HttpResponse::InternalServerError().body("Failed to fetch system status")
+            false
         })?;
 
     if row.config_value != "success" {
         error!("System not initialized");
-        return Err(HttpResponse::BadRequest().body("System needs initialization"));
+        return Err(false);
     }
 
     Ok(())

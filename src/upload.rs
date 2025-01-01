@@ -68,7 +68,7 @@ pub async fn upload_file(
     mut payload: web::Payload,
     data: web::Data<Arc<AppState>>,
 ) -> HttpResponse {
-    if let Err(response) = check_system_initialized(&data.db_pool).await {
+    if let Err(_) = check_system_initialized(&data.db_pool).await {
         return HttpResponse::BadRequest().json(ApiResponse::<()>::error(
             "System not initialized",
             "SYSTEM_NOT_INITIALIZED"
@@ -178,16 +178,17 @@ pub async fn upload_file(
         hasher.update(&chunk[..bytes_to_write]);
         uploaded_size += bytes_to_write as u64;
 
-        // 如果已经写入了足够的字节数，退出循环
-        if uploaded_size - start_pos >= content_length {
-            break;
-        }
 
         let checksum = format!("{:x}", hasher.clone().finalize());
 
         // 更新上传进度表，仅更新 uploaded_size 和 checksum
         if let Err(e) = update_upload_progress(&data.db_pool, uploaded_size, &checksum, &file_id, start_offset).await {
             return HttpResponse::InternalServerError().body(e);
+        }
+
+        // 如果已经写入了足够的字节数，退出循环
+        if uploaded_size - start_pos >= content_length {
+            break;
         }
     }
 
@@ -256,7 +257,7 @@ pub async fn submit_file_metadata(
     metadata: web::Json<FileMetadata>,
     data: web::Data<Arc<AppState>>,
 ) -> HttpResponse {
-    if let Err(response) = check_system_initialized(&data.db_pool).await {
+    if let Err(_) = check_system_initialized(&data.db_pool).await {
         return HttpResponse::BadRequest().json(ApiResponse::<()>::error(
             "System not initialized",
             "SYSTEM_NOT_INITIALIZED"
@@ -308,9 +309,10 @@ pub async fn submit_file_metadata(
 
     for i in 0..num_chunks {
         let start_offset = i * chunk_size;
-        let end_offset = ((i + 1) * chunk_size).min(metadata.total_size) - 1;
+        let end_offset = ((i + 1) * chunk_size).min(metadata.total_size);
+            let chunk_size= end_offset - start_offset;
 
-        if let Err(e) = initialize_upload_progress(&mut tx, &file_id, &safe_filename, metadata.total_size, start_offset, end_offset).await {
+        if let Err(e) = initialize_upload_progress(&mut tx, &file_id, &safe_filename, chunk_size, start_offset, end_offset).await {
             tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
             return HttpResponse::InternalServerError().body(e);
         }
@@ -318,7 +320,7 @@ pub async fn submit_file_metadata(
         chunks.push(ChunkInfo {
             start_offset,
             end_offset,
-            chunk_size: end_offset - start_offset + 1,
+            chunk_size,
         });
     }
 
