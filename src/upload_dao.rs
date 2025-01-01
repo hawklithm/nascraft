@@ -1,10 +1,8 @@
-use sqlx::mysql::MySqlPool;
+use sqlx::{MySqlPool, Transaction, MySql};
 use sqlx::query;
-use log::error;
+use log::{error, info};
 use sqlx::types::BigDecimal;
 use bigdecimal::ToPrimitive;
-use log::info;
-use sqlx::{Transaction, MySql};
 
 pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(String, String, i64), String> {
     match query!(
@@ -87,24 +85,24 @@ pub async fn fetch_chunk_size(db_pool: &MySqlPool) -> Result<u64, String> {
 }
 
 pub async fn initialize_upload_progress(
-    db_pool: &MySqlPool,
+    tx: &mut Transaction<'_, MySql>,
     file_id: &str,
     safe_filename: &str,
     total_size: u64,
     start_offset: u64,
     end_offset: u64,
 ) -> Result<(), String> {
-    if let Err(e) = query!(
-        "INSERT INTO upload_progress (file_id, checksum, filename, total_size, uploaded_size, start_offset, end_offset) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        file_id,
-        "", // Initial checksum is empty
-        safe_filename,
-        total_size,
-        0, // Initial uploaded size is 0
-        start_offset,
-        end_offset
+    if let Err(e) = sqlx::query(
+        "INSERT INTO upload_progress (file_id, checksum, filename, total_size, uploaded_size, start_offset, end_offset) VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
-    .execute(db_pool)
+    .bind(file_id)
+    .bind("") // Initial checksum is empty
+    .bind(safe_filename)
+    .bind(total_size)
+    .bind(0) // Initial uploaded size is 0
+    .bind(start_offset)
+    .bind(end_offset)
+    .execute(&mut **tx)
     .await
     {
         error!("Failed to initialize upload progress: {}", e);
@@ -114,20 +112,20 @@ pub async fn initialize_upload_progress(
 }
 
 pub async fn save_upload_state_to_db(
-    pool: &MySqlPool,
+    tx: &mut Transaction<'_, MySql>,
     file_id: &str,
     filename: &str,
     total_size: u64,
     checksum: &str,
 ) -> Result<(), String> {
-    if let Err(e) = query!(
-        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum) VALUES (?, ?, ?, ?)",
-        file_id,
-        filename,
-        total_size,
-        checksum
+    if let Err(e) = sqlx::query(
+        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum) VALUES (?, ?, ?, ?)"
     )
-    .execute(pool)
+    .bind(file_id)
+    .bind(filename)
+    .bind(total_size)
+    .bind(checksum)
+    .execute(&mut **tx)
     .await
     {
         error!("Failed to save upload state: {}", e);

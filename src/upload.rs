@@ -11,7 +11,7 @@ use serde_json::json;
 use log::error;
 use sanitize_filename::sanitize;
 use uuid::Uuid;
-use sqlx::mysql::MySqlPool;
+use sqlx::{MySqlPool, Transaction, MySql};
 use crate::init_env::{check_table_structure_endpoint, ensure_table_structure_endpoint, check_system_initialized};
 use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db};
 
@@ -30,8 +30,8 @@ pub struct UploadState {
 }
 
 impl UploadState {
-    pub async fn save_to_db(&self, pool: &MySqlPool) -> Result<(), String> {
-        save_upload_state_to_db(pool, &self.id, &self.filename, self.total_size, &self.checksum ).await
+    pub async fn save_to_db(&self, tx: &mut Transaction<'_, MySql>) -> Result<(), String> {
+        save_upload_state_to_db(tx, &self.id, &self.filename, self.total_size, &self.checksum).await
     }
 }
 
@@ -275,8 +275,18 @@ pub async fn submit_file_metadata(
         checksum: String::new(),
     };
 
+    // Start a transaction
+    let mut tx = match data.db_pool.begin().await {
+        Ok(transaction) => transaction,
+        Err(e) => {
+            error!("Failed to begin transaction: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to begin transaction");
+        }
+    };
+
     // Save to database
-    if let Err(e) = upload_state.save_to_db(&data.db_pool).await {
+    if let Err(e) = upload_state.save_to_db(&mut tx).await {
+        tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
         return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
             &e,
             "DB_SAVE_ERROR"
@@ -286,7 +296,10 @@ pub async fn submit_file_metadata(
     // Get chunk size configuration
     let chunk_size = match fetch_chunk_size(&data.db_pool).await {
         Ok(size) => size,
-        Err(e) => return HttpResponse::InternalServerError().body(e),
+        Err(e) => {
+            tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
+            return HttpResponse::InternalServerError().body(e);
+        }
     };
 
     // Calculate number of chunks and initialize upload_progress table
@@ -297,7 +310,8 @@ pub async fn submit_file_metadata(
         let start_offset = i * chunk_size;
         let end_offset = ((i + 1) * chunk_size).min(metadata.total_size) - 1;
 
-        if let Err(e) = initialize_upload_progress(&data.db_pool, &file_id, &safe_filename, metadata.total_size, start_offset, end_offset).await {
+        if let Err(e) = initialize_upload_progress(&mut tx, &file_id, &safe_filename, metadata.total_size, start_offset, end_offset).await {
+            tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
             return HttpResponse::InternalServerError().body(e);
         }
 
@@ -306,6 +320,12 @@ pub async fn submit_file_metadata(
             end_offset,
             chunk_size: end_offset - start_offset + 1,
         });
+    }
+
+    // Commit the transaction
+    if let Err(e) = tx.commit().await {
+        error!("Failed to commit transaction: {}", e);
+        return HttpResponse::InternalServerError().body("Failed to commit transaction");
     }
 
     // Save to in-memory state
