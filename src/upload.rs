@@ -379,10 +379,10 @@ async fn merge_chunks(filename: &str, total_size: u64) -> Result<(), String> {
             return Err("Failed to copy chunk to final file".to_string());
         }
 
-        // if let Err(e) = fs::remove_file(&chunk_file_path).await {
-        //     error!("Failed to delete chunk file: {}", e);
-        //     return Err("Failed to delete chunk file".to_string());
-        // }
+        if let Err(e) = fs::remove_file(&chunk_file_path).await {
+            error!("Failed to delete chunk file: {}", e);
+            return Err("Failed to delete chunk file".to_string());
+        }
     }
 
     Ok(())
