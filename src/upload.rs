@@ -13,7 +13,7 @@ use sanitize_filename::sanitize;
 use uuid::Uuid;
 use sqlx::{MySqlPool, Transaction, MySql};
 use crate::init_env::check_system_initialized;
-use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files};
+use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files};
 
 #[derive(Debug)]
 pub struct AppState {
@@ -407,10 +407,21 @@ pub async fn get_uploaded_files(
     let sort_by = query.sort_by.as_deref().unwrap_or("id");
     let order = query.order.as_deref().unwrap_or("asc");
 
+    let total_files = match fetch_total_uploaded_files(&data.db_pool, status).await {
+        Ok(total) => total,
+        Err(e) => return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            &e,
+            "FETCH_TOTAL_FILES_ERROR",
+        )),
+    };
+
     match fetch_uploaded_files(&data.db_pool, page, page_size, status, sort_by, order).await {
         Ok(files) => HttpResponse::Ok().json(ApiResponse::success(
             "Fetched uploaded files successfully",
-            files,
+            json!({
+                "total_files": total_files,
+                "files": files
+            }),
         )),
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
             &e,

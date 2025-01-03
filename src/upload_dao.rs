@@ -1,4 +1,4 @@
-use sqlx::{MySql, MySqlPool, Transaction};
+use sqlx::{MySql, MySqlPool, Transaction, Row};
 use sqlx::query;
 use log::{error, info};
 use sqlx::types::BigDecimal;
@@ -185,6 +185,25 @@ pub async fn fetch_uploaded_files(
         Err(e) => {
             error!("Failed to fetch uploaded files: {}", e);
             Err("Failed to fetch uploaded files".to_string())
+        }
+    }
+}
+
+pub async fn fetch_total_uploaded_files(db_pool: &MySqlPool, status: Option<i32>) -> Result<i64, String> {
+    let mut query_str = "SELECT COUNT(*) as total FROM upload_file_meta WHERE 1=1".to_string();
+
+    if let Some(status) = status {
+        query_str.push_str(&format!(" AND status = {}", status));
+    }
+
+    match query(&query_str)
+        .fetch_one(db_pool)
+        .await
+    {
+        Ok(row) => Ok(row.get::<i64, _>("total")),
+        Err(e) => {
+            error!("Failed to fetch total uploaded files: {}", e);
+            Err("Failed to fetch total uploaded files".to_string())
         }
     }
 }
