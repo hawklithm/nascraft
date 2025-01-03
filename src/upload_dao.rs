@@ -142,7 +142,7 @@ pub async fn save_upload_state_to_db(
 pub struct UploadedFile {
     pub file_id: String,
     pub filename: String,
-    pub total_size: u64,
+    pub total_size: i64,
     pub checksum: String,
     pub status: i32,
 }
