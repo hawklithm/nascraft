@@ -1,8 +1,10 @@
-use sqlx::{MySqlPool, Transaction, MySql};
+use sqlx::{MySql, MySqlPool, Transaction};
 use sqlx::query;
 use log::{error, info};
 use sqlx::types::BigDecimal;
 use bigdecimal::ToPrimitive;
+use serde::Serialize;
+use sqlx::FromRow;
 
 pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(String, String, i64), String> {
     match query!(
@@ -134,4 +136,55 @@ pub async fn save_upload_state_to_db(
     info!("Successfully saved upload state for file '{}', ID: '{}'", filename, file_id);
 
     Ok(())
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct UploadedFile {
+    pub file_id: String,
+    pub filename: String,
+    pub total_size: u64,
+    pub checksum: String,
+    pub status: i32,
+}
+
+pub async fn fetch_uploaded_files(
+    db_pool: &MySqlPool,
+    page: u32,
+    page_size: u32,
+    status: Option<i32>,
+    sort_by: &str,
+    order: &str,
+) -> Result<Vec<UploadedFile>, String> {
+    let offset = (page - 1) * page_size;
+    let mut query = format!(
+        "SELECT file_id, filename, total_size, checksum, status FROM upload_file_meta WHERE 1=1"
+    );
+
+    if let Some(status) = status {
+        query.push_str(&format!(" AND status = {}", status));
+    }
+
+    match sort_by {
+        "size" => query.push_str(" ORDER BY total_size"),
+        "date" => query.push_str(" ORDER BY last_updated"),
+        _ => query.push_str(" ORDER BY id"), // Default sorting by id
+    }
+
+    match order {
+        "desc" => query.push_str(" DESC"),
+        _ => query.push_str(" ASC"), // Default order is ascending
+    }
+
+    query.push_str(&format!(" LIMIT {} OFFSET {}", page_size, offset));
+
+    match sqlx::query_as::<_, UploadedFile>(&query)
+        .fetch_all(db_pool)
+        .await
+    {
+        Ok(files) => Ok(files),
+        Err(e) => {
+            error!("Failed to fetch uploaded files: {}", e);
+            Err("Failed to fetch uploaded files".to_string())
+        }
+    }
 }

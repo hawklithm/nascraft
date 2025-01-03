@@ -13,7 +13,7 @@ use sanitize_filename::sanitize;
 use uuid::Uuid;
 use sqlx::{MySqlPool, Transaction, MySql};
 use crate::init_env::check_system_initialized;
-use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db};
+use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files};
 
 #[derive(Debug)]
 pub struct AppState {
@@ -386,4 +386,35 @@ async fn merge_chunks(filename: &str, total_size: u64) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct Pagination {
+    page: u32,
+    page_size: u32,
+    status: Option<i32>,
+    sort_by: Option<String>,
+    order: Option<String>,
+}
+
+pub async fn get_uploaded_files(
+    data: web::Data<Arc<AppState>>,
+    query: web::Query<Pagination>,
+) -> HttpResponse {
+    let page = query.page;
+    let page_size = query.page_size;
+    let status = query.status;
+    let sort_by = query.sort_by.as_deref().unwrap_or("id");
+    let order = query.order.as_deref().unwrap_or("asc");
+
+    match fetch_uploaded_files(&data.db_pool, page, page_size, status, sort_by, order).await {
+        Ok(files) => HttpResponse::Ok().json(ApiResponse::success(
+            "Fetched uploaded files successfully",
+            files,
+        )),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            &e,
+            "FETCH_FILES_ERROR",
+        )),
+    }
 }
