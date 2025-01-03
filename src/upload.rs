@@ -1,18 +1,18 @@
 use actix_web::{web, HttpRequest, HttpResponse};
 use futures::StreamExt;
 use sha2::{Sha256, Digest};
-use tokio::fs::{self, OpenOptions};
+use tokio::fs::OpenOptions;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use log::error;
+use log::{error, info};
 use sanitize_filename::sanitize;
 use uuid::Uuid;
 use sqlx::{MySqlPool, Transaction, MySql};
-use crate::init_env::{check_table_structure_endpoint, ensure_table_structure_endpoint, check_system_initialized};
+use crate::init_env::check_system_initialized;
 use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db};
 
 #[derive(Debug)]
@@ -121,7 +121,7 @@ pub async fn upload_file(
         .get(actix_web::http::header::CONTENT_RANGE)
         .and_then(|h| h.to_str().ok());
 
-    let (start_pos, end_pos) = match content_range {
+    let (start_pos, _end_pos) = match content_range {
         Some(range) => {
             let parts: Vec<&str> = range.split('/').next()
                 .unwrap_or("bytes 0-0")
@@ -150,7 +150,7 @@ pub async fn upload_file(
         };
 
     // 移动文件指针到 start_pos
-    if let Err(e) = file.seek(tokio::io::SeekFrom::Start(start_pos)).await {
+    if let Err(e) = file.seek(tokio::io::SeekFrom::Start(start_pos-start_offset)).await {
         error!("Failed to seek file: {}", e);
         return HttpResponse::InternalServerError().body(format!("Failed to seek file: {}", e));
     }
@@ -177,12 +177,13 @@ pub async fn upload_file(
         }
         hasher.update(&chunk[..bytes_to_write]);
         uploaded_size += bytes_to_write as u64;
+        info!("uploaded_size: {}, bytes_to_write: {},start_offset: {}, start_pos: {}, content_length: {}", uploaded_size, bytes_to_write, start_offset, start_pos, content_length);
 
 
         let checksum = format!("{:x}", hasher.clone().finalize());
 
         // 更新上传进度表，仅更新 uploaded_size 和 checksum
-        if let Err(e) = update_upload_progress(&data.db_pool, uploaded_size, &checksum, &file_id, start_offset).await {
+        if let Err(e) = update_upload_progress(&data.db_pool, uploaded_size-start_pos, &checksum, &file_id, start_offset).await {
             return HttpResponse::InternalServerError().body(e);
         }
 
@@ -309,8 +310,8 @@ pub async fn submit_file_metadata(
 
     for i in 0..num_chunks {
         let start_offset = i * chunk_size;
-        let end_offset = ((i + 1) * chunk_size).min(metadata.total_size);
-            let chunk_size= end_offset - start_offset;
+        let end_offset = ((i + 1) * chunk_size).min(metadata.total_size)-1;
+            let chunk_size= end_offset - start_offset+1;
 
         if let Err(e) = initialize_upload_progress(&mut tx, &file_id, &safe_filename, chunk_size, start_offset, end_offset).await {
             tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
@@ -378,10 +379,10 @@ async fn merge_chunks(filename: &str, total_size: u64) -> Result<(), String> {
             return Err("Failed to copy chunk to final file".to_string());
         }
 
-        if let Err(e) = fs::remove_file(&chunk_file_path).await {
-            error!("Failed to delete chunk file: {}", e);
-            return Err("Failed to delete chunk file".to_string());
-        }
+        // if let Err(e) = fs::remove_file(&chunk_file_path).await {
+        //     error!("Failed to delete chunk file: {}", e);
+        //     return Err("Failed to delete chunk file".to_string());
+        // }
     }
 
     Ok(())
