@@ -1,4 +1,4 @@
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse, Result};
 use futures::StreamExt;
 use sha2::{Sha256, Digest as ShaDigest};
 use tokio::fs::{self, OpenOptions};
@@ -100,7 +100,7 @@ pub async fn upload_file(
             }
         };
 
-    let (filename, _, total_size, _) = match fetch_file_record(&data.db_pool, &file_id).await {
+    let (filename, _, total_size, _, _) = match fetch_file_record(&data.db_pool, &file_id).await {
         Ok(record) => record,
         Err(e) => return HttpResponse::InternalServerError().body(e),
     };
@@ -243,7 +243,7 @@ pub async fn upload_file(
         let calculated_md5 = format!("{:x}", hasher.finalize());
 
         // 从数据库中获取预期的哈希值
-        let (_, expected_md5, _, _) = match fetch_file_record(&data.db_pool, &file_id).await {
+        let (_, expected_md5, _, _, _) = match fetch_file_record(&data.db_pool, &file_id).await {
             Ok(record) => record,
             Err(e) => return HttpResponse::InternalServerError().body(e),
         };
@@ -489,7 +489,7 @@ pub async fn get_upload_status(
     let file_id_str = file_id.into_inner();
 
     // Fetch file record to get the current status
-    let (_filename, _, _, status) = match fetch_file_record(&data.db_pool, &file_id_str).await {
+    let (_filename, _, _, status, _) = match fetch_file_record(&data.db_pool, &file_id_str).await {
         Ok(record) => record,
         Err(e) => return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
             &e,
@@ -542,3 +542,4 @@ pub async fn get_upload_status(
         response_data,
     ))
 }
+

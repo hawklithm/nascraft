@@ -6,15 +6,15 @@ use bigdecimal::ToPrimitive;
 use serde::Serialize;
 use sqlx::FromRow;
 
-pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(String, String, i64, i32), String> {
+pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(String, String, i64, i32, String), String> {
     match query!(
-        "SELECT filename, checksum, total_size, status FROM upload_file_meta WHERE file_id = ?",
+        "SELECT filename, checksum, total_size, status, file_path FROM upload_file_meta WHERE file_id = ?",
         file_id
     )
     .fetch_one(db_pool)
     .await
     {
-        Ok(record) => Ok((record.filename, record.checksum, record.total_size, record.status.unwrap_or(0))),
+        Ok(record) => Ok((record.filename, record.checksum, record.total_size, record.status.unwrap_or(0), record.file_path)),
         Err(e) => {
             error!("Failed to fetch file record: {}", e);
             Err("Failed to fetch file record".to_string())

@@ -1,6 +1,7 @@
 mod init_env;
 mod upload;
 mod upload_dao;
+mod download;
 
 use actix_web::{web, App, HttpServer};
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use init_env::{init_db_pool, check_table_structure_endpoint, ensure_table_struct
 use simplelog::*;
 use std::env;
 use std::path::{Path, PathBuf};
+use download::download_file;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -84,6 +86,7 @@ async fn main() -> std::io::Result<()> {
             .route("/ensure_table_structure", web::post().to(ensure_table_structure_endpoint))
             .route("/uploaded_files", web::get().to(get_uploaded_files))
             .route("/upload_status/{file_id}", web::get().to(get_upload_status))
+            .route("/download/{file_id}", web::get().to(download_file))
             // 其他路由保持不变
     })
     .bind("127.0.0.1:8080")?

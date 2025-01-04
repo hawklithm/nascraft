@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT filename, checksum, total_size, status FROM upload_file_meta WHERE file_id = ?",
+  "query": "SELECT filename, checksum, total_size, status, file_path FROM upload_file_meta WHERE file_id = ?",
   "describe": {
     "columns": [
       {
@@ -38,6 +38,15 @@
           "flags": "",
           "max_size": 11
         }
+      },
+      {
+        "ordinal": 4,
+        "name": "file_path",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
+          "max_size": 1020
+        }
       }
     ],
     "parameters": {
@@ -47,8 +56,9 @@
       false,
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "97de7f3c9c5d70f23aba180bbc30f815370acaf723e5488fc32b17003acc0609"
+  "hash": "afffaf01a2cb4b8ad4c42f1ebccfb51919e4907a301638090f6f99c83bb83ea0"
 }
