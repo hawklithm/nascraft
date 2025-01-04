@@ -11,6 +11,11 @@ Nascraft is a web application designed to handle file uploads efficiently using 
 - **Upload Progress Tracking**: Track the progress of each file upload, ensuring that all parts are received before final assembly.
 - **Database Integration**: Use MySQL for storing file metadata and upload progress, with support for database initialization and structure checks.
 - **Asynchronous Processing**: Leverage Rust's asynchronous capabilities for efficient file handling and database operations.
+- **Query Uploaded Files**: Retrieve a list of uploaded files with support for pagination, filtering by status, sorting, and total count.
+
+## Frontend Repository
+
+The frontend code for Nascraft is available in a separate repository. You can find it here: [Nascraft Web UI](https://github.com/hawklithm/nascraft-webui).
 
 ## Getting Started
 
@@ -58,177 +63,46 @@ Nascraft is a web application designed to handle file uploads efficiently using 
 
 5. Access the application at `http://127.0.0.1:8080`.
 
-### API Response Format
-
-All API endpoints return responses in the following format:
-
-```json
-{
-    "message": "Operation result message",
-    "status": 1,  // 1 for success, 0 for failure
-    "code": "0",  // "0" for success, error code string for failures
-    "data": {     // Optional, contains the actual response data
-        // Response data specific to each endpoint
-    }
-}
-```
-
-#### Status Codes
-- `1`: Success
-- `0`: Failure
-
-#### Error Codes
-- `"0"`: Success (no error)
-- `"SYSTEM_NOT_INITIALIZED"`: System initialization required
-- `"MISSING_FILE_ID"`: File ID not provided
-- `"DB_SAVE_ERROR"`: Database operation failed
-- `"MERGE_CHUNKS_ERROR"`: Error while merging file chunks
-- `"UPLOAD_ERROR"`: General upload error
-- `"SYSTEM_INIT_ERROR"`: Failed to initialize system status
-- `"TABLE_STRUCTURE_ERROR"`: Database table structure error
-
 ### API Endpoints
 
-#### `/submit_metadata`
+#### `/uploaded_files`
 
-**Description**: Submit metadata for a file before starting the upload process.
+**Description**: Retrieve a list of uploaded files with pagination, filtering by status, sorting options, and total count.
 
 **Request**:
-- Method: POST
-- Content-Type: application/json
-- Body:
-```json
-{
-    "filename": "example.txt",
-    "total_size": 10485760
-}
-```
+- Method: GET
+- Query Parameters:
+  - `page`: The page number to retrieve (default is 1).
+  - `page_size`: The number of items per page (default is 10).
+  - `status`: Optional. Filter files by their status.
+  - `sort_by`: Optional. Sort files by `size`, `date`, or `id` (default is `id`).
+  - `order`: Optional. Sort order, either `asc` or `desc` (default is `asc`).
 
 **Success Response**:
 ```json
 {
-    "message": "Metadata submitted successfully",
+    "message": "Fetched uploaded files successfully",
     "status": 1,
     "code": "0",
     "data": {
-        "id": "550e8400-e29b-41d4-a716-446655440000",
-        "total_size": 10485760,
-        "chunk_size": 1048576,
-        "total_chunks": 10,
-        "chunks": [
+        "total_files": 100,
+        "files": [
             {
-                "start_offset": 0,
-                "end_offset": 1048575,
-                "chunk_size": 1048576
+                "file_id": "550e8400-e29b-41d4-a716-446655440000",
+                "filename": "example.txt",
+                "total_size": 10485760,
+                "checksum": "abc123...",
+                "status": 2
             },
-            {
-                "start_offset": 1048576,
-                "end_offset": 2097151,
-                "chunk_size": 1048576
-            }
+            // More files...
         ]
     }
 }
 ```
 
-#### `/upload`
-
-**Description**: Upload a chunk of a file.
-
-**Request**:
-- Method: POST
-- Headers:
-  - X-File-ID: Unique identifier returned from /submit_metadata
-  - X-Start-Offset: Starting byte offset of the chunk
-  - Content-Length: Length of the chunk in bytes
-  - Content-Range: Range of bytes being uploaded (e.g., "bytes 0-1048575/10485760")
-- Body: Binary file chunk data
-
-**Success Response (Chunk Upload)**:
-```json
-{
-    "message": "Chunk upload successful",
-    "status": 1,
-    "code": "0",
-    "data": {
-        "status": "range_success",
-        "filename": "example.txt",
-        "size": 1048576,
-        "checksum": "abc123..."
-    }
-}
-```
-
-**Success Response (Final Chunk)**:
-```json
-{
-    "message": "File upload completed successfully",
-    "status": 1,
-    "code": "0",
-    "data": {
-        "status": "success",
-        "filename": "example.txt",
-        "size": 10485760,
-        "checksum": "xyz789..."
-    }
-}
-```
-
-#### `/check_table_structure`
-
-**Description**: Check if the database tables have the correct structure.
-
-**Request**:
-- Method: GET
-
-**Success Response**:
-```json
-{
-    "message": "Table structure is as expected and system initialized status set to success.",
-    "status": 1,
-    "code": "0",
-    "data": null
-}
-```
-
-**Error Response**:
-```json
-{
-    "message": "Table structure check failed with errors.",
-    "status": 0,
-    "code": "TABLE_STRUCTURE_ERROR",
-    "data": [
-        "Error checking 'upload_file_meta': Table 'upload_file_meta' does not exist",
-        "Error checking 'upload_progress': Column type mismatch for 'upload_progress', field 'checksum': expected 'varchar', found 'text'"
-    ]
-}
-```
-
-#### `/ensure_table_structure`
-
-**Description**: Ensure database tables are created with the correct structure.
-
-**Request**:
-- Method: GET
-
-**Success Response**:
-```json
-{
-    "message": "Table structure is ensured using init.sql.",
-    "status": 1,
-    "code": "0",
-    "data": null
-}
-```
-
-**Error Response**:
-```json
-{
-    "message": "Failed to ensure table structure: [error details]",
-    "status": 0,
-    "code": "TABLE_STRUCTURE_ERROR",
-    "data": null
-}
+**Example Usage**:
+```bash
+curl -X GET "http://localhost:8080/uploaded_files?page=1&page_size=10&status=2&sort_by=size&order=desc"
 ```
 
 ### Example Usage

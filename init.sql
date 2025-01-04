@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS upload_file_meta (
     total_size BIGINT NOT NULL,
     checksum VARCHAR(64) NOT NULL,
     status INT DEFAULT 0,
+    file_path VARCHAR(255) NOT NULL,
     UNIQUE KEY unique_file_id (file_id)
 );
 
@@ -25,7 +26,7 @@ CREATE TABLE IF NOT EXISTS upload_progress (
     uploaded_size BIGINT NOT NULL,
     start_offset BIGINT NOT NULL,
     end_offset BIGINT NOT NULL,
-    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    last_updated BIGINT DEFAULT 0,
     FOREIGN KEY (file_id) REFERENCES upload_file_meta(file_id),
     INDEX idx_file_id (file_id)
 ); 

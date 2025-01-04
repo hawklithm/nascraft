@@ -1,7 +1,7 @@
 use actix_web::{web, HttpRequest, HttpResponse};
 use futures::StreamExt;
 use sha2::{Sha256, Digest};
-use tokio::fs::{self,OpenOptions};
+use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -13,7 +13,8 @@ use sanitize_filename::sanitize;
 use uuid::Uuid;
 use sqlx::{MySqlPool, Transaction, MySql};
 use crate::init_env::check_system_initialized;
-use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files};
+use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress};
+use chrono::Utc;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -30,8 +31,8 @@ pub struct UploadState {
 }
 
 impl UploadState {
-    pub async fn save_to_db(&self, tx: &mut Transaction<'_, MySql>) -> Result<(), String> {
-        save_upload_state_to_db(tx, &self.id, &self.filename, self.total_size, &self.checksum).await
+    pub async fn save_to_db(&self, tx: &mut Transaction<'_, MySql>, file_path: &str) -> Result<(), String> {
+        save_upload_state_to_db(tx, &self.id, &self.filename, self.total_size, &self.checksum, file_path).await
     }
 }
 
@@ -98,7 +99,7 @@ pub async fn upload_file(
             }
         };
 
-    let (filename, _, total_size) = match fetch_file_record(&data.db_pool, &file_id).await {
+    let (filename, _, total_size, _) = match fetch_file_record(&data.db_pool, &file_id).await {
         Ok(record) => record,
         Err(e) => return HttpResponse::InternalServerError().body(e),
     };
@@ -201,17 +202,18 @@ pub async fn upload_file(
 
     if total_uploaded >= total_size {
         // 更新文件状态为处理中
-        if let Err(e) = update_file_status(&data.db_pool, &file_id, 0, 1).await {
+        if let Err(e) = update_file_status_and_path(&data.db_pool, &file_id, 0, 1, "").await {
             return HttpResponse::InternalServerError().body(e);
         }
 
         // 组合分片文件为完整文件
+        let final_file_path = format!("uploads/{}", safe_filename);
         if let Err(e) = merge_chunks(&safe_filename, total_size).await {
             return HttpResponse::InternalServerError().body(e);
         }
 
-        // 更新文件状态为已完成
-        if let Err(e) = update_file_status(&data.db_pool, &file_id, 1, 2).await {
+        // 更新文件状态为已完成并更新文件路径
+        if let Err(e) = update_file_status_and_path(&data.db_pool, &file_id, 1, 2, &final_file_path).await {
             return HttpResponse::InternalServerError().body(e);
         }
 
@@ -287,7 +289,7 @@ pub async fn submit_file_metadata(
     };
 
     // Save to database
-    if let Err(e) = upload_state.save_to_db(&mut tx).await {
+    if let Err(e) = upload_state.save_to_db(&mut tx, "").await {
         tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
         return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
             &e,
@@ -428,4 +430,65 @@ pub async fn get_uploaded_files(
             "FETCH_FILES_ERROR",
         )),
     }
+}
+
+pub async fn get_upload_status(
+    data: web::Data<Arc<AppState>>,
+    file_id: web::Path<String>,
+) -> HttpResponse {
+    let file_id_str = file_id.into_inner();
+
+    // Fetch file record to get the current status
+    let (_filename, _, _, status) = match fetch_file_record(&data.db_pool, &file_id_str).await {
+        Ok(record) => record,
+        Err(e) => return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            &e,
+            "FETCH_FILE_RECORD_ERROR",
+        )),
+    };
+
+    // If status is 1 (processing) or 2 (completed), return it directly
+    let status_str = match status {
+        1 => "processing",
+        2 => "completed",
+        _ => {
+            // Fetch upload progress for each chunk
+            let chunk_progress = match fetch_upload_progress(&data.db_pool, &file_id_str).await {
+                Ok(progress) => progress,
+                Err(e) => return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                    &e,
+                    "FETCH_PROGRESS_ERROR",
+                )),
+            };
+
+            // Determine overall status
+            let now = Utc::now().timestamp();
+            let is_paused = chunk_progress.iter().all(|chunk| {
+                now - chunk.last_updated > 60 // Check if last updated is more than 60 seconds ago
+            });
+
+            if is_paused {
+                "paused"
+            } else {
+                "uploading"
+            }
+        }
+    };
+
+    // Prepare the response
+    let mut response_data = json!({
+        "file_id": file_id_str,
+        "status": status_str,
+    });
+
+    // Include chunk information only if status is not processing or completed
+    if status_str != "processing" && status_str != "completed" {
+        let chunk_progress = fetch_upload_progress(&data.db_pool, &file_id_str).await.unwrap_or_default();
+        response_data["chunks"] = json!(chunk_progress);
+    }
+
+    HttpResponse::Ok().json(ApiResponse::success(
+        "Fetched upload status successfully",
+        response_data,
+    ))
 }

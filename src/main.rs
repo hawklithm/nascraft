@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use log::{error, info};
-use upload::{upload_file, submit_file_metadata, AppState, get_uploaded_files};
+use upload::{upload_file, submit_file_metadata, AppState, get_uploaded_files, get_upload_status};
 use init_env::{init_db_pool, check_table_structure_endpoint, ensure_table_structure_endpoint};
 use simplelog::*;
 use std::env;
@@ -83,6 +83,7 @@ async fn main() -> std::io::Result<()> {
             .route("/check_table_structure", web::get().to(check_table_structure_endpoint))
             .route("/ensure_table_structure", web::post().to(ensure_table_structure_endpoint))
             .route("/uploaded_files", web::get().to(get_uploaded_files))
+            .route("/upload_status/{file_id}", web::get().to(get_upload_status))
             // 其他路由保持不变
     })
     .bind("127.0.0.1:8080")?

@@ -6,15 +6,15 @@ use bigdecimal::ToPrimitive;
 use serde::Serialize;
 use sqlx::FromRow;
 
-pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(String, String, i64), String> {
+pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(String, String, i64, i32), String> {
     match query!(
-        "SELECT filename, checksum, total_size FROM upload_file_meta WHERE file_id = ?",
+        "SELECT filename, checksum, total_size, status FROM upload_file_meta WHERE file_id = ?",
         file_id
     )
     .fetch_one(db_pool)
     .await
     {
-        Ok(record) => Ok((record.filename, record.checksum, record.total_size)),
+        Ok(record) => Ok((record.filename, record.checksum, record.total_size, record.status.unwrap_or(0))),
         Err(e) => {
             error!("Failed to fetch file record: {}", e);
             Err("Failed to fetch file record".to_string())
@@ -55,18 +55,25 @@ pub async fn get_total_uploaded(db_pool: &MySqlPool, file_id: &str) -> Result<u6
     }
 }
 
-pub async fn update_file_status(db_pool: &MySqlPool, file_id: &str, current_status: i32, new_status: i32) -> Result<(), String> {
+pub async fn update_file_status_and_path(
+    db_pool: &MySqlPool,
+    file_id: &str,
+    current_status: i32,
+    new_status: i32,
+    file_path: &str,
+) -> Result<(), String> {
     if let Err(e) = query!(
-        "UPDATE upload_file_meta SET status = ? WHERE file_id = ? AND status = ?",
+        "UPDATE upload_file_meta SET status = ?, file_path = ? WHERE file_id = ? AND status = ?",
         new_status,
+        file_path,
         file_id,
         current_status
     )
     .execute(db_pool)
     .await
     {
-        error!("Failed to update file status: {}", e);
-        return Err("Failed to update file status".to_string());
+        error!("Failed to update file status and path: {}", e);
+        return Err("Failed to update file status and path".to_string());
     }
     Ok(())
 }
@@ -119,14 +126,16 @@ pub async fn save_upload_state_to_db(
     filename: &str,
     total_size: u64,
     checksum: &str,
+    file_path: &str,
 ) -> Result<(), String> {
     if let Err(e) = sqlx::query(
-        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum) VALUES (?, ?, ?, ?)"
+        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum, file_path) VALUES (?, ?, ?, ?, ?)"
     )
     .bind(file_id)
     .bind(filename)
     .bind(total_size)
     .bind(checksum)
+    .bind(file_path)
     .execute(&mut **tx)
     .await
     {
@@ -145,6 +154,7 @@ pub struct UploadedFile {
     pub total_size: i64,
     pub checksum: String,
     pub status: i32,
+    pub file_path: String,
 }
 
 pub async fn fetch_uploaded_files(
@@ -204,6 +214,30 @@ pub async fn fetch_total_uploaded_files(db_pool: &MySqlPool, status: Option<i32>
         Err(e) => {
             error!("Failed to fetch total uploaded files: {}", e);
             Err("Failed to fetch total uploaded files".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct ChunkProgress {
+    pub start_offset: i64,
+    pub end_offset: i64,
+    pub uploaded_size: i64,
+    pub last_updated: i64,
+}
+
+pub async fn fetch_upload_progress(db_pool: &MySqlPool, file_id: &str) -> Result<Vec<ChunkProgress>, String> {
+    match sqlx::query_as::<_, ChunkProgress>(
+        &format!("SELECT start_offset, end_offset, uploaded_size, last_updated FROM upload_progress WHERE file_id = {}",
+        file_id)
+    )
+    .fetch_all(db_pool)
+    .await
+    {
+        Ok(chunks) => Ok(chunks),
+        Err(e) => {
+            error!("Failed to fetch upload progress: {}", e);
+            Err("Failed to fetch upload progress".to_string())
         }
     }
 }
