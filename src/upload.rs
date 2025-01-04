@@ -1,8 +1,8 @@
 use actix_web::{web, HttpRequest, HttpResponse};
 use futures::StreamExt;
-use sha2::{Sha256, Digest};
+use sha2::{Sha256, Digest as ShaDigest};
 use tokio::fs::{self, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, AsyncReadExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
@@ -15,6 +15,7 @@ use sqlx::{MySqlPool, Transaction, MySql};
 use crate::init_env::check_system_initialized;
 use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress};
 use chrono::Utc;
+use md5::Md5;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -178,8 +179,7 @@ pub async fn upload_file(
         }
         hasher.update(&chunk[..bytes_to_write]);
         uploaded_size += bytes_to_write as u64;
-        info!("uploaded_size: {}, bytes_to_write: {},start_offset: {}, start_pos: {}, content_length: {}", uploaded_size, bytes_to_write, start_offset, start_pos, content_length);
-
+        info!("file_id: {}, uploaded_size: {}, bytes_to_write: {},start_offset: {}, start_pos: {}, content_length: {}", file_id, uploaded_size, bytes_to_write, start_offset, start_pos, content_length);
 
         let checksum = format!("{:x}", hasher.clone().finalize());
 
@@ -193,6 +193,9 @@ pub async fn upload_file(
             break;
         }
     }
+
+    // Log successful chunk upload
+    info!("Chunk uploaded successfully for file ID: {}, start_offset: {}", file_id, start_offset);
 
     // 检查所有分片是否上传完成
     let total_uploaded = match get_total_uploaded(&data.db_pool, &file_id).await {
@@ -212,12 +215,51 @@ pub async fn upload_file(
             return HttpResponse::InternalServerError().body(e);
         }
 
+        // Log successful merge
+        info!("Chunks merged successfully for file ID: {}", file_id);
+
+        // 计算合并后文件的 MD5 哈希值
+        let mut file = match OpenOptions::new().read(true).open(&final_file_path).await {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to open final file for hashing: {}", e);
+                return HttpResponse::InternalServerError().body("Failed to open final file for hashing");
+            }
+        };
+
+        let mut hasher = Md5::new();
+        let mut buffer = [0; 1024];
+        loop {
+            let n = match file.read(&mut buffer).await {
+                Ok(n) if n == 0 => break,
+                Ok(n) => n,
+                Err(e) => {
+                    error!("Failed to read final file for hashing: {}", e);
+                    return HttpResponse::InternalServerError().body("Failed to read final file for hashing");
+                }
+            };
+            hasher.update(&buffer[..n]);
+        }
+        let calculated_md5 = format!("{:x}", hasher.finalize());
+
+        // 从数据库中获取预期的哈希值
+        let (_, expected_md5, _, _) = match fetch_file_record(&data.db_pool, &file_id).await {
+            Ok(record) => record,
+            Err(e) => return HttpResponse::InternalServerError().body(e),
+        };
+
+        // 比较哈希值
+        if calculated_md5 != expected_md5 {
+            return HttpResponse::InternalServerError().body("File is corrupted: MD5 hash mismatch");
+        }
+
+        // Log successful checksum validation
+        info!("Checksum validated successfully for file ID: {}", file_id);
+
         // 更新文件状态为已完成并更新文件路径
         if let Err(e) = update_file_status_and_path(&data.db_pool, &file_id, 1, 2, &final_file_path).await {
             return HttpResponse::InternalServerError().body(e);
         }
-
-        let final_checksum = format!("{:x}", hasher.finalize());
 
         HttpResponse::Ok().json(ApiResponse::success(
             "File upload completed successfully",
@@ -225,7 +267,7 @@ pub async fn upload_file(
                 "status": "success",
                 "filename": safe_filename,
                 "size": total_size,
-                "checksum": final_checksum
+                "checksum": calculated_md5
             })
         ))
     } else {
@@ -247,6 +289,7 @@ pub async fn upload_file(
 pub struct FileMetadata {
     pub filename: String,
     pub total_size: u64,
+    pub checksum: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -276,7 +319,7 @@ pub async fn submit_file_metadata(
         id: unique_id.clone(),
         filename: safe_filename.clone(),
         total_size: metadata.total_size,
-        checksum: String::new(),
+        checksum: metadata.checksum.clone(),
     };
 
     // Start a transaction
@@ -302,7 +345,10 @@ pub async fn submit_file_metadata(
         Ok(size) => size,
         Err(e) => {
             tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
-            return HttpResponse::InternalServerError().body(e);
+            return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                &e,
+                "FETCH_CHUNK_SIZE_ERROR"
+            ));
         }
     };
 
@@ -330,7 +376,10 @@ pub async fn submit_file_metadata(
     // Commit the transaction
     if let Err(e) = tx.commit().await {
         error!("Failed to commit transaction: {}", e);
-        return HttpResponse::InternalServerError().body("Failed to commit transaction");
+        return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            &e.to_string(),
+            "COMMIT_TRANSACTION_ERROR"
+        ));
     }
 
     // Save to in-memory state
@@ -339,7 +388,8 @@ pub async fn submit_file_metadata(
     HttpResponse::Ok().json(ApiResponse::success(
         "Metadata submitted successfully",
         json!({
-            "id": unique_id,
+            "id": file_id,
+            "filename": safe_filename,
             "total_size": metadata.total_size,
             "chunk_size": chunk_size,
             "total_chunks": num_chunks,
