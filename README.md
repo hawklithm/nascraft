@@ -50,8 +50,8 @@ The frontend code for Nascraft is available in a separate repository. You can fi
    SQLX_OFFLINE=true
 
    # Table Structure Configuration
-   EXPECTED_COLUMNS_UPLOAD_FILE_META=id:bigint,file_id:varchar,filename:varchar,total_size:bigint,checksum:varchar,status:int
-   EXPECTED_COLUMNS_UPLOAD_PROGRESS=id:bigint,file_id:varchar,checksum:varchar,filename:varchar,total_size:bigint,uploaded_size:bigint,start_offset:bigint,end_offset:bigint,last_updated:timestamp
+   EXPECTED_COLUMNS_UPLOAD_FILE_META=id:bigint,file_id:varchar,filename:varchar,total_size:bigint,checksum:varchar,status:int,file_path:varchar
+   EXPECTED_COLUMNS_UPLOAD_PROGRESS=id:bigint,file_id:varchar,checksum:varchar,filename:varchar,total_size:bigint,uploaded_size:bigint,start_offset:bigint,end_offset:bigint,last_updated:bigint
    ```
 
 4. Build and run the application:
