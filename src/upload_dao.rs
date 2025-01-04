@@ -167,7 +167,7 @@ pub async fn fetch_uploaded_files(
 ) -> Result<Vec<UploadedFile>, String> {
     let offset = (page - 1) * page_size;
     let mut query = format!(
-        "SELECT file_id, filename, total_size, checksum, status FROM upload_file_meta WHERE 1=1"
+        "SELECT file_id, filename, total_size, checksum, status,file_path FROM upload_file_meta WHERE 1=1"
     );
 
     if let Some(status) = status {
