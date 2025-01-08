@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS upload_file_meta (
     checksum VARCHAR(64) NOT NULL,
     status INT DEFAULT 0,
     file_path VARCHAR(255) NOT NULL,
+    last_updated BIGINT DEFAULT 0,
     UNIQUE KEY unique_file_id (file_id)
 );
 

@@ -5,6 +5,7 @@ use sqlx::types::BigDecimal;
 use bigdecimal::ToPrimitive;
 use serde::Serialize;
 use sqlx::FromRow;
+use chrono;
 
 pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(String, String, i64, i32, String), String> {
     match query!(
@@ -62,10 +63,14 @@ pub async fn update_file_status_and_path(
     new_status: i32,
     file_path: &str,
 ) -> Result<(), String> {
+    // Get current timestamp
+    let current_time = chrono::Utc::now().timestamp();
+
     if let Err(e) = query!(
-        "UPDATE upload_file_meta SET status = ?, file_path = ? WHERE file_id = ? AND status = ?",
+        "UPDATE upload_file_meta SET status = ?, file_path = ?, last_updated = ? WHERE file_id = ? AND status = ?",
         new_status,
         file_path,
+        current_time,
         file_id,
         current_status
     )
@@ -155,6 +160,7 @@ pub struct UploadedFile {
     pub checksum: String,
     pub status: i32,
     pub file_path: String,
+    pub last_updated: i64,
 }
 
 pub async fn fetch_uploaded_files(
@@ -167,7 +173,7 @@ pub async fn fetch_uploaded_files(
 ) -> Result<Vec<UploadedFile>, String> {
     let offset = (page - 1) * page_size;
     let mut query = format!(
-        "SELECT file_id, filename, total_size, checksum, status,file_path FROM upload_file_meta WHERE 1=1"
+        "SELECT file_id, filename, total_size, checksum, status, file_path, last_updated FROM upload_file_meta WHERE 1=1"
     );
 
     if let Some(status) = status {

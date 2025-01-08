@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE upload_file_meta SET status = ?, file_path = ?, last_updated = ? WHERE file_id = ? AND status = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "6cc9a6f55398a962f1238cefce2088d5c3624fb50165315897d5866c2bb5b193"
+}
