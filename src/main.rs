@@ -2,6 +2,7 @@ mod init_env;
 mod upload;
 mod upload_dao;
 mod download;
+mod display_remote;
 
 use actix_web::{web, App, HttpServer};
 use std::sync::Arc;
@@ -14,6 +15,10 @@ use simplelog::*;
 use std::env;
 use std::path::{Path, PathBuf};
 use download::download_file;
+use display_remote::{
+    DLNAPlayer, discover_devices, connect_device, 
+    play_video, pause_video, resume_video, stop_video, get_status, serve_media
+};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -59,6 +64,12 @@ async fn main() -> std::io::Result<()> {
         return Err(e);
     }
 
+    // 创建media目录
+    if let Err(e) = std::fs::create_dir_all("media") {
+        error!("Failed to create media directory: {}", e);
+        return Err(e);
+    }
+
     // Initialize the database pool
     let db_pool = match init_db_pool().await {
         Ok(pool) => pool,
@@ -73,6 +84,9 @@ async fn main() -> std::io::Result<()> {
         db_pool: db_pool.clone(),
     });
 
+    // 创建DLNA播放器实例
+    let dlna_player = Arc::new(Mutex::new(DLNAPlayer::new().await));
+
     info!("Starting server at http://127.0.0.1:8080");
     println!("Starting server at http://127.0.0.1:8080");
 
@@ -80,6 +94,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(app_state.clone()))
             .app_data(web::Data::new(db_pool.clone()))
+            .app_data(web::Data::new(dlna_player.clone()))
             .route("/upload", web::post().to(upload_file))
             .route("/submit_metadata", web::post().to(submit_file_metadata))
             .route("/check_table_structure", web::get().to(check_table_structure_endpoint))
@@ -87,6 +102,16 @@ async fn main() -> std::io::Result<()> {
             .route("/uploaded_files", web::get().to(get_uploaded_files))
             .route("/upload_status/{file_id}", web::get().to(get_upload_status))
             .route("/download/{file_id}", web::get().to(download_file))
+            // DLNA相关路由
+            .route("/dlna/devices", web::get().to(discover_devices))
+            .route("/dlna/connect/{device_location}", web::post().to(connect_device))
+            .route("/dlna/play", web::post().to(play_video))
+            .route("/dlna/pause", web::post().to(pause_video))
+            .route("/dlna/resume", web::post().to(resume_video))
+            .route("/dlna/stop", web::post().to(stop_video))
+            .route("/dlna/status", web::get().to(get_status))
+            // 媒体文件服务
+            .route("/media/{filename:.*}", web::get().to(serve_media))
             // 其他路由保持不变
     })
     .bind("127.0.0.1:8080")?
