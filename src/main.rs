@@ -17,12 +17,21 @@ use std::path::{Path, PathBuf};
 use download::download_file;
 use display_remote::{
     DLNAPlayer, discover_devices, connect_device, 
-    play_video, pause_video, resume_video, stop_video, get_status, serve_media
+    play_video, pause_video, resume_video, stop_video, get_status, serve_media, hello
 };
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok(); // 加载 .env 文件
+
+    // 检查是否存在 DATABASE_URL
+    let has_database = match env::var("DATABASE_URL") {
+        Ok(_) => true,
+        Err(_) => {
+            info!("DATABASE_URL not found, skipping database initialization");
+            false
+        }
+    };
 
     // 设置日志输出
     let log_file_path = match env::var("LOG_FILE_PATH") {
@@ -49,7 +58,7 @@ async fn main() -> std::io::Result<()> {
 
     CombinedLogger::init(vec![
         WriteLogger::new(
-            LevelFilter::Info,
+            LevelFilter::Debug,
             Config::default(),
             std::fs::File::create(&log_file_path).unwrap_or_else(|e| {
                 error!("Failed to create log file: {}", e);
@@ -70,13 +79,17 @@ async fn main() -> std::io::Result<()> {
         return Err(e);
     }
 
-    // Initialize the database pool
-    let db_pool = match init_db_pool().await {
-        Ok(pool) => pool,
-        Err(e) => {
-            error!("Failed to initialize database pool: {}", e);
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to initialize database pool"));
+    // 根据 has_database 决定是否初始化数据库
+    let db_pool = if has_database {
+        match init_db_pool().await {
+            Ok(pool) => Some(pool),
+            Err(e) => {
+                error!("Failed to initialize database pool: {}", e);
+                None
+            }
         }
+    } else {
+        None
     };
 
     let app_state = Arc::new(AppState {
@@ -91,18 +104,25 @@ async fn main() -> std::io::Result<()> {
     println!("Starting server at http://127.0.0.1:8080");
 
     HttpServer::new(move || {
-        App::new()
+        let mut app = App::new()
             .app_data(web::Data::new(app_state.clone()))
-            .app_data(web::Data::new(db_pool.clone()))
             .app_data(web::Data::new(dlna_player.clone()))
-            .route("/upload", web::post().to(upload_file))
-            .route("/submit_metadata", web::post().to(submit_file_metadata))
-            .route("/check_table_structure", web::get().to(check_table_structure_endpoint))
-            .route("/ensure_table_structure", web::post().to(ensure_table_structure_endpoint))
-            .route("/uploaded_files", web::get().to(get_uploaded_files))
-            .route("/upload_status/{file_id}", web::get().to(get_upload_status))
-            .route("/download/{file_id}", web::get().to(download_file))
-            // DLNA相关路由
+            .route("/upload", web::post().to(upload_file));
+
+        // 只有在有数据库连接时才添加数据库相关路由
+        if has_database {
+            app = app
+                .app_data(web::Data::new(db_pool.clone().unwrap()))
+                .route("/submit_metadata", web::post().to(submit_file_metadata))
+                .route("/check_table_structure", web::get().to(check_table_structure_endpoint))
+                .route("/ensure_table_structure", web::post().to(ensure_table_structure_endpoint))
+                .route("/upload_status/{file_id}", web::get().to(get_upload_status))
+                .route("/download/{file_id}", web::get().to(download_file))
+                .route("/uploaded_files", web::get().to(get_uploaded_files));
+        }
+
+        // 添加 DLNA 相关路由并返回完整的 app
+        app
             .route("/dlna/devices", web::get().to(discover_devices))
             .route("/dlna/connect/{device_location}", web::post().to(connect_device))
             .route("/dlna/play", web::post().to(play_video))
@@ -110,9 +130,8 @@ async fn main() -> std::io::Result<()> {
             .route("/dlna/resume", web::post().to(resume_video))
             .route("/dlna/stop", web::post().to(stop_video))
             .route("/dlna/status", web::get().to(get_status))
-            // 媒体文件服务
             .route("/media/{filename:.*}", web::get().to(serve_media))
-            // 其他路由保持不变
+            .route("/hello", web::get().to(hello))
     })
     .bind("127.0.0.1:8080")?
     .run()

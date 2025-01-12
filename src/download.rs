@@ -11,9 +11,10 @@ pub async fn download_file(
     file_id: web::Path<String>,
 ) -> Result<HttpResponse> {
     let file_id_str = file_id.into_inner();
+    let db_pool = data.db_pool.as_ref().unwrap();
 
     // Fetch file record to get the file path
-    let (_, _, _, _, file_path) = match fetch_file_record(&data.db_pool, &file_id_str).await {
+    let (_, _, _, _, file_path) = match fetch_file_record(db_pool, &file_id_str).await {
         Ok(record) => record,
         Err(e) => return Ok(HttpResponse::InternalServerError().body(e)),
     };

@@ -20,7 +20,16 @@ use md5::Md5;
 #[derive(Debug)]
 pub struct AppState {
     pub uploads: Mutex<HashMap<String, UploadState>>,
-    pub db_pool: MySqlPool,
+    pub db_pool: Option<MySqlPool>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            uploads: Mutex::new(HashMap::new()),
+            db_pool: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,12 +79,14 @@ pub async fn upload_file(
     mut payload: web::Payload,
     data: web::Data<Arc<AppState>>,
 ) -> HttpResponse {
-    if let Err(_) = check_system_initialized(&data.db_pool).await {
+    let db_pool = data.db_pool.as_ref().unwrap();
+    if let Err(_) = check_system_initialized(db_pool).await {
         return HttpResponse::BadRequest().json(ApiResponse::<()>::error(
             "System not initialized",
             "SYSTEM_NOT_INITIALIZED"
         ));
     }
+
 
     let file_id = match req.headers()
         .get("X-File-ID")
@@ -100,7 +111,7 @@ pub async fn upload_file(
             }
         };
 
-    let (filename, _, total_size, _, _) = match fetch_file_record(&data.db_pool, &file_id).await {
+    let (filename, _, total_size, _, _) = match fetch_file_record(db_pool, &file_id).await {
         Ok(record) => record,
         Err(e) => return HttpResponse::InternalServerError().body(e),
     };
@@ -184,7 +195,7 @@ pub async fn upload_file(
         let checksum = format!("{:x}", hasher.clone().finalize());
 
         // 更新上传进度表，仅更新 uploaded_size 和 checksum
-        if let Err(e) = update_upload_progress(&data.db_pool, uploaded_size-start_pos, &checksum, &file_id, start_offset).await {
+        if let Err(e) = update_upload_progress(db_pool, uploaded_size-start_pos, &checksum, &file_id, start_offset).await {
             return HttpResponse::InternalServerError().body(e);
         }
 
@@ -198,14 +209,14 @@ pub async fn upload_file(
     info!("Chunk uploaded successfully for file ID: {}, start_offset: {}", file_id, start_offset);
 
     // 检查所有分片是否上传完成
-    let total_uploaded = match get_total_uploaded(&data.db_pool, &file_id).await {
+    let total_uploaded = match get_total_uploaded(db_pool, &file_id).await {
         Ok(size) => size,
         Err(e) => return HttpResponse::InternalServerError().body(e),
     };
 
     if total_uploaded >= total_size {
         // 更新文件状态为处理中
-        if let Err(e) = update_file_status_and_path(&data.db_pool, &file_id, 0, 1, "").await {
+        if let Err(e) = update_file_status_and_path(db_pool, &file_id, 0, 1, "").await {
             return HttpResponse::InternalServerError().body(e);
         }
 
@@ -243,7 +254,7 @@ pub async fn upload_file(
         let calculated_md5 = format!("{:x}", hasher.finalize());
 
         // 从数据库中获取预期的哈希值
-        let (_, expected_md5, _, _, _) = match fetch_file_record(&data.db_pool, &file_id).await {
+        let (_, expected_md5, _, _, _) = match fetch_file_record(db_pool, &file_id).await {
             Ok(record) => record,
             Err(e) => return HttpResponse::InternalServerError().body(e),
         };
@@ -257,7 +268,7 @@ pub async fn upload_file(
         info!("Checksum validated successfully for file ID: {}", file_id);
 
         // 更新文件状态为已完成并更新文件路径
-        if let Err(e) = update_file_status_and_path(&data.db_pool, &file_id, 1, 2, &final_file_path).await {
+        if let Err(e) = update_file_status_and_path(db_pool, &file_id, 1, 2, &final_file_path).await {
             return HttpResponse::InternalServerError().body(e);
         }
 
@@ -303,7 +314,8 @@ pub async fn submit_file_metadata(
     metadata: web::Json<FileMetadata>,
     data: web::Data<Arc<AppState>>,
 ) -> HttpResponse {
-    if let Err(_) = check_system_initialized(&data.db_pool).await {
+    let db_pool = data.db_pool.as_ref().unwrap();
+    if let Err(_) = check_system_initialized(db_pool).await {
         return HttpResponse::BadRequest().json(ApiResponse::<()>::error(
             "System not initialized",
             "SYSTEM_NOT_INITIALIZED"
@@ -323,7 +335,7 @@ pub async fn submit_file_metadata(
     };
 
     // Start a transaction
-    let mut tx = match data.db_pool.begin().await {
+    let mut tx = match db_pool.begin().await {
         Ok(transaction) => transaction,
         Err(e) => {
             error!("Failed to begin transaction: {}", e);
@@ -341,7 +353,7 @@ pub async fn submit_file_metadata(
     }
 
     // Get chunk size configuration
-    let chunk_size = match fetch_chunk_size(&data.db_pool).await {
+    let chunk_size = match fetch_chunk_size(db_pool).await {
         Ok(size) => size,
         Err(e) => {
             tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
@@ -459,7 +471,10 @@ pub async fn get_uploaded_files(
     let sort_by = query.sort_by.as_deref().unwrap_or("id");
     let order = query.order.as_deref().unwrap_or("asc");
 
-    let total_files = match fetch_total_uploaded_files(&data.db_pool, status).await {
+
+    let db_pool = data.db_pool.as_ref().unwrap();
+
+    let total_files = match fetch_total_uploaded_files(db_pool, status).await {
         Ok(total) => total,
         Err(e) => return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
             &e,
@@ -467,7 +482,7 @@ pub async fn get_uploaded_files(
         )),
     };
 
-    match fetch_uploaded_files(&data.db_pool, page, page_size, status, sort_by, order).await {
+    match fetch_uploaded_files(db_pool, page, page_size, status, sort_by, order).await {
         Ok(files) => HttpResponse::Ok().json(ApiResponse::success(
             "Fetched uploaded files successfully",
             json!({
@@ -488,8 +503,10 @@ pub async fn get_upload_status(
 ) -> HttpResponse {
     let file_id_str = file_id.into_inner();
 
+    let db_pool = data.db_pool.as_ref().unwrap();
+
     // Fetch file record to get the current status
-    let (_filename, _, _, status, _) = match fetch_file_record(&data.db_pool, &file_id_str).await {
+    let (_filename, _, _, status, _) = match fetch_file_record(db_pool, &file_id_str).await {
         Ok(record) => record,
         Err(e) => return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
             &e,
@@ -503,7 +520,7 @@ pub async fn get_upload_status(
         2 => "completed",
         _ => {
             // Fetch upload progress for each chunk
-            let chunk_progress = match fetch_upload_progress(&data.db_pool, &file_id_str).await {
+            let chunk_progress = match fetch_upload_progress(db_pool, &file_id_str).await {
                 Ok(progress) => progress,
                 Err(e) => return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
                     &e,
@@ -533,7 +550,7 @@ pub async fn get_upload_status(
 
     // Include chunk information only if status is not processing or completed
     if status_str != "processing" && status_str != "completed" {
-        let chunk_progress = fetch_upload_progress(&data.db_pool, &file_id_str).await.unwrap_or_default();
+        let chunk_progress = fetch_upload_progress(db_pool, &file_id_str).await.unwrap_or_default();
         response_data["chunks"] = json!(chunk_progress);
     }
 

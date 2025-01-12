@@ -3,13 +3,17 @@ use std::time::Duration;
 use log::{info, error};
 use local_ip_address::local_ip;
 use mime_guess::from_path;
-use std::net::SocketAddr;
 use actix_web::{web, HttpResponse, Error};
 use actix_files::NamedFile;
 use serde::{Deserialize, Serialize};
 use rupnp::ssdp::SearchTarget;
 use rupnp::{Device, Service};
 use std::str::FromStr;
+use rupnp::ssdp::URN;
+use futures::StreamExt;
+use actix_web::http::Uri;
+use tokio::sync::Mutex;
+use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 pub enum TransportState {
@@ -35,46 +39,60 @@ impl DLNAPlayer {
     }
 
     pub async fn discover_devices(&mut self) -> Result<Vec<Device>, String> {
+        info!("开始设备发现...");
         let search_target = SearchTarget::from_str("urn:schemas-upnp-org:service:AVTransport:1")
             .map_err(|e| format!("创建搜索目标失败: {}", e))?;
 
-        let devices = rupnp::discover(&search_target, Duration::from_secs(5))
+        let mut stream = Box::pin(rupnp::discover(&search_target, Duration::from_secs(5))
             .await
-            .map_err(|e| format!("设备搜索失败: {}", e))?
-            .collect::<Vec<_>>()
-            .await;
+            .map_err(|e| format!("设备搜索失败: {}", e))?);
+        
+        let mut devices = Vec::new();
+        while let Some(device_result) = stream.next().await {
+            match device_result {
+                Ok(device) => {
+                    info!("发现设备: {}", device.url());
+                    devices.push(device);
+                }
+                Err(e) => {
+                    error!("获取设备失败: {}", e);
+                    return Err(format!("获取设备失败: {}", e));
+                }
+            }
+        }
 
         if devices.is_empty() {
+            error!("未找到支持DLNA的设备");
             return Err("未找到支持DLNA的设备".to_string());
         }
 
+        info!("设备发现完成，共发现 {} 个设备", devices.len());
         Ok(devices)
     }
 
     pub async fn connect_to_device(&mut self, device: Device) -> Result<(), String> {
-        // 查找 AVTransport 服务
+        info!("尝试连接到设备: {}", device.url());
         let av_transport = device
-            .find_service("urn:schemas-upnp-org:service:AVTransport:1")
+            .find_service(&URN::service("schemas-upnp-org", "AVTransport", 1))
             .ok_or("设备不支持 AVTransport 服务")?;
 
-        self.device = Some(device);
-        self.av_transport = Some(av_transport);
+        self.device = Some(device.clone());
+        self.av_transport = Some(av_transport.clone());
+        info!("成功连接到设备: {}", device.url());
         Ok(())
     }
 
     pub async fn play_video(&self, video_path: &Path) -> Result<(), String> {
         let av_transport = self.av_transport.as_ref().ok_or("未连接到设备")?;
         
-        // 验证文件是否存在
         if !video_path.exists() {
+            error!("文件不存在: {}", video_path.display());
             return Err(format!("文件不存在: {}", video_path.display()));
         }
         
-        // 获取本地IP地址
         let local_ip = local_ip()
             .map_err(|e| format!("获取本地IP地址失败: {}", e))?;
             
-        // 构建视频URL
         let video_url = format!(
             "http://{}:{}/media/{}",
             local_ip,
@@ -86,83 +104,108 @@ impl DLNAPlayer {
 
         info!("播放视频URL: {}", video_url);
 
-        // 获取MIME类型
         let mime_type = from_path(video_path)
             .first_or_octet_stream()
             .to_string();
 
         info!("视频MIME类型: {}", mime_type);
 
-        // 设置 URI
-        let mut args = vec![
-            ("InstanceID", "0"),
-            ("CurrentURI", &video_url),
-            ("CurrentURIMetaData", ""),
-        ];
+        let uri = Uri::from_static("http://example.com"); // 使用实际的 URI
+        let args = format!(
+            "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>",
+            video_url
+        );
 
         av_transport
-            .call_action("SetAVTransportURI", args)
+            .action(&uri, "SetAVTransportURI", &args)
             .await
-            .map_err(|e| format!("设置视频URI失败: {}", e))?;
+            .map_err(|e| {
+                error!("设置视频URI失败: {}", e);
+                format!("设置视频URI失败: {}", e)
+            })?;
 
-        // 开始播放
-        args = vec![("InstanceID", "0"), ("Speed", "1")];
+        let args = "<InstanceID>0</InstanceID><Speed>1</Speed>";
         av_transport
-            .call_action("Play", args)
+            .action(&uri, "Play", &args)
             .await
-            .map_err(|e| format!("播放失败: {}", e))?;
+            .map_err(|e| {
+                error!("播放失败: {}", e);
+                format!("播放失败: {}", e)
+            })?;
 
+        info!("视频播放开始");
         Ok(())
     }
 
     pub async fn pause(&self) -> Result<(), String> {
         if let Some(av_transport) = &self.av_transport {
-            let args = vec![("InstanceID", "0")];
+            let uri = Uri::from_static("http://example.com"); // 使用实际的 URI
+            let args = "<InstanceID>0</InstanceID>";
             av_transport
-                .call_action("Pause", args)
+                .action(&uri, "Pause", &args)
                 .await
-                .map_err(|e| format!("暂停失败: {}", e))?;
+                .map_err(|e| {
+                    error!("暂停失败: {}", e);
+                    format!("暂停失败: {}", e)
+                })?;
+            info!("视频已暂停");
         }
         Ok(())
     }
 
     pub async fn resume(&self) -> Result<(), String> {
         if let Some(av_transport) = &self.av_transport {
-            let args = vec![("InstanceID", "0"), ("Speed", "1")];
+            let uri = Uri::from_static("http://example.com"); // 使用实际的 URI
+            let args = "<InstanceID>0</InstanceID><Speed>1</Speed>";
             av_transport
-                .call_action("Play", args)
+                .action(&uri, "Play", &args)
                 .await
-                .map_err(|e| format!("恢复播放失败: {}", e))?;
+                .map_err(|e| {
+                    error!("恢复播放失败: {}", e);
+                    format!("恢复播放失败: {}", e)
+                })?;
+            info!("视频已恢复播放");
         }
         Ok(())
     }
 
     pub async fn stop(&self) -> Result<(), String> {
         if let Some(av_transport) = &self.av_transport {
-            let args = vec![("InstanceID", "0")];
+            let uri = Uri::from_static("http://example.com"); // 使用实际的 URI
+            let args = "<InstanceID>0</InstanceID>";
             av_transport
-                .call_action("Stop", args)
+                .action(&uri, "Stop", &args)
                 .await
-                .map_err(|e| format!("停止播放失败: {}", e))?;
+                .map_err(|e| {
+                    error!("停止播放失败: {}", e);
+                    format!("停止播放失败: {}", e)
+                })?;
+            info!("视频已停止播放");
         }
         Ok(())
     }
 
     pub async fn get_playback_status(&self) -> Result<TransportState, String> {
         if let Some(av_transport) = &self.av_transport {
-            let args = vec![("InstanceID", "0")];
+            let uri = Uri::from_static("http://example.com"); // 使用实际的 URI
+            let args = "<InstanceID>0</InstanceID>";
             let response = av_transport
-                .call_action("GetTransportInfo", args)
+                .action(&uri, "GetTransportInfo", &args)
                 .await
-                .map_err(|e| format!("获取播放状态失败: {}", e))?;
+                .map_err(|e| {
+                    error!("获取播放状态失败: {}", e);
+                    format!("获取播放状态失败: {}", e)
+                })?;
 
-            let state = response.get("CurrentTransportState").unwrap_or("UNKNOWN");
-            Ok(match state {
+            let state = response.get("CurrentTransportState").cloned().unwrap_or("UNKNOWN".to_string());
+            let transport_state = match state.as_str() {
                 "PLAYING" => TransportState::Playing,
                 "PAUSED_PLAYBACK" => TransportState::Paused,
                 "STOPPED" => TransportState::Stopped,
                 _ => TransportState::Unknown,
-            })
+            };
+            info!("当前播放状态: {:?}", transport_state);
+            Ok(transport_state)
         } else {
             Err("未连接到设备".to_string())
         }
@@ -181,21 +224,28 @@ pub struct DeviceInfo {
 }
 
 pub async fn discover_devices(
-    dlna_player: web::Data<tokio::sync::Mutex<DLNAPlayer>>,
+    dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
 ) -> Result<HttpResponse, Error> {
+    println!("start discover_devices");
     let mut player = dlna_player.lock().await;
     match player.discover_devices().await {
         Ok(devices) => {
             let device_infos: Vec<DeviceInfo> = devices
                 .iter()
-                .map(|d| DeviceInfo {
-                    name: d.description().device().friendly_name.clone(),
-                    location: d.url().to_string(),
+                .map(|d| {
+                    let friendly_name = d.friendly_name();
+                    DeviceInfo {
+                        name: friendly_name.to_string(),
+                        location: d.url().to_string(),
+                    }
                 })
                 .collect();
             Ok(HttpResponse::Ok().json(device_infos))
         }
-        Err(e) => Ok(HttpResponse::InternalServerError().body(e)),
+        Err(e) => {
+            error!("设备搜索失败: {}", e);
+            Ok(HttpResponse::InternalServerError().body(e))
+        }
     }
 }
 
@@ -301,5 +351,9 @@ pub async fn get_status(
 // 新增：处理媒体文件的请求
 pub async fn serve_media(path: web::Path<String>) -> Result<NamedFile, Error> {
     let media_path = PathBuf::from("media").join(path.into_inner());
-    Ok(NamedFile::open(media_path)?)
+    NamedFile::open(media_path).map_err(Error::from)
+}
+
+pub async fn hello() -> Result<HttpResponse, Error> {
+    Ok(HttpResponse::Ok().body("Hello, the service is alive!"))
 } 
