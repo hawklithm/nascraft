@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use log::{info, error};
 use local_ip_address::local_ip;
-use mime_guess::from_path;
 use actix_web::{web, HttpResponse, Error};
 use actix_files::NamedFile;
 use serde::{Deserialize, Serialize};
@@ -14,6 +13,7 @@ use futures::StreamExt;
 use actix_web::http::Uri;
 use tokio::sync::Mutex;
 use std::sync::Arc;
+use std::convert::TryFrom;
 
 #[derive(Debug, Serialize)]
 pub enum TransportState {
@@ -94,7 +94,7 @@ impl DLNAPlayer {
             .map_err(|e| format!("获取本地IP地址失败: {}", e))?;
             
         let video_url = format!(
-            "http://{}:{}/media/{}",
+            "http://{}:{}/{}",
             local_ip,
             self.media_server_port,
             video_path.file_name()
@@ -104,17 +104,46 @@ impl DLNAPlayer {
 
         info!("播放视频URL: {}", video_url);
 
-        let mime_type = from_path(video_path)
-            .first_or_octet_stream()
-            .to_string();
+        let control_url = if let Some(device) = &self.device {
+            device.url().to_string()
+        } else {
+            return Err("设备未连接".to_string());
+        };
 
-        info!("视频MIME类型: {}", mime_type);
+        let uri = Uri::try_from(&control_url).map_err(|e| {
+            error!("无效的控制URI: {}", e);
+            format!("无效的控制URI: {}", e)
+        })?;
 
-        let uri = Uri::from_static("http://example.com"); // 使用实际的 URI
-        let args = format!(
-            "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>",
+        let metadata = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" 
+                       xmlns:dc="http://purl.org/dc/elements/1.1/" 
+                       xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">
+                <item id="0" parentID="-1" restricted="0">
+                    <dc:title>{}</dc:title>
+                    <upnp:class>object.item.videoItem</upnp:class>
+                    <res protocolInfo="http-get:*:*:*">{}</res>
+                </item>
+            </DIDL-Lite>"#,
+            video_path.file_name().unwrap().to_string_lossy(),
             video_url
         );
+
+        let metadata = metadata.replace('\n', "").replace("    ", "");
+
+        let stop_args = "<InstanceID>0</InstanceID>";
+        let _ = av_transport.action(&uri, "Stop", stop_args).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let args = format!(
+            "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI><CurrentURIMetaData>{}</CurrentURIMetaData>",
+            video_url,
+            metadata
+        );
+
+        info!("SetAVTransportURI args: {}", args);
 
         av_transport
             .action(&uri, "SetAVTransportURI", &args)
@@ -123,6 +152,8 @@ impl DLNAPlayer {
                 error!("设置视频URI失败: {}", e);
                 format!("设置视频URI失败: {}", e)
             })?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
         let args = "<InstanceID>0</InstanceID><Speed>1</Speed>";
         av_transport
@@ -223,6 +254,11 @@ pub struct DeviceInfo {
     location: String,
 }
 
+#[derive(Deserialize)]
+pub struct ConnectDeviceRequest {
+    device_location: String,
+}
+
 pub async fn discover_devices(
     dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
 ) -> Result<HttpResponse, Error> {
@@ -250,8 +286,8 @@ pub async fn discover_devices(
 }
 
 pub async fn connect_device(
-    dlna_player: web::Data<tokio::sync::Mutex<DLNAPlayer>>,
-    device_location: web::Path<String>,
+    dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
+    req: web::Json<ConnectDeviceRequest>,
 ) -> Result<HttpResponse, Error> {
     let mut player = dlna_player.lock().await;
     
@@ -262,7 +298,7 @@ pub async fn connect_device(
     };
     
     // 查找指定位置的设备
-    let device = match devices.into_iter().find(|d| d.url().to_string() == device_location.as_str()) {
+    let device = match devices.into_iter().find(|d| d.url().to_string() == req.device_location) {
         Some(device) => device,
         None => return Ok(HttpResponse::NotFound().body("设备未找到")),
     };
@@ -274,7 +310,7 @@ pub async fn connect_device(
 }
 
 pub async fn play_video(
-    dlna_player: web::Data<tokio::sync::Mutex<DLNAPlayer>>,
+    dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
     req: web::Json<PlayVideoRequest>,
 ) -> Result<HttpResponse, Error> {
     let player = dlna_player.lock().await;
@@ -298,9 +334,25 @@ pub async fn play_video(
             actix_web::error::ErrorInternalServerError(e)
         })?;
     }
-    
+
+    // 获取本地IP地址
+    let local_ip = local_ip().map_err(|e| {
+        error!("获取本地IP地址失败: {}", e);
+        actix_web::error::ErrorInternalServerError(e)
+    })?;
+
+    // 生成视频的局域网可访问URI
+    let video_uri = format!(
+        "http://{}:{}/{}",
+        local_ip,
+        8081, // 假设你的服务器运行在这个端口
+        media_path.file_name().unwrap().to_string_lossy()
+    );
+
+    info!("生成的视频URI: {}", video_uri);
+
     match player.play_video(&media_path).await {
-        Ok(_) => Ok(HttpResponse::Ok().body("开始播放")),
+        Ok(_) => Ok(HttpResponse::Ok().body(format!("开始播放: {}", video_uri))),
         Err(e) => {
             error!("播放视频失败: {}", e);
             Ok(HttpResponse::InternalServerError().body(e))

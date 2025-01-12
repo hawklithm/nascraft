@@ -19,6 +19,7 @@ use display_remote::{
     DLNAPlayer, discover_devices, connect_device, 
     play_video, pause_video, resume_video, stop_video, get_status, serve_media, hello
 };
+use actix_files as fs;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -103,7 +104,8 @@ async fn main() -> std::io::Result<()> {
     info!("Starting server at http://127.0.0.1:8080");
     println!("Starting server at http://127.0.0.1:8080");
 
-    HttpServer::new(move || {
+    // 启动主服务器
+    let main_server = HttpServer::new(move || {
         let mut app = App::new()
             .app_data(web::Data::new(app_state.clone()))
             .app_data(web::Data::new(dlna_player.clone()))
@@ -124,7 +126,7 @@ async fn main() -> std::io::Result<()> {
         // 添加 DLNA 相关路由并返回完整的 app
         app
             .route("/dlna/devices", web::get().to(discover_devices))
-            .route("/dlna/connect/{device_location}", web::post().to(connect_device))
+            .route("/dlna/connect", web::post().to(connect_device))
             .route("/dlna/play", web::post().to(play_video))
             .route("/dlna/pause", web::post().to(pause_video))
             .route("/dlna/resume", web::post().to(resume_video))
@@ -134,6 +136,22 @@ async fn main() -> std::io::Result<()> {
             .route("/hello", web::get().to(hello))
     })
     .bind("127.0.0.1:8080")?
-    .run()
-    .await
+    .run();
+
+    // 启动媒体服务器
+    let media_server = HttpServer::new(|| {
+        App::new()
+            .service(fs::Files::new("/", "./media").show_files_listing())
+    })
+    .bind("0.0.0.0:8081")?
+    .run();
+
+    // 使用 tokio::spawn 启动两个服务器
+    tokio::spawn(main_server);
+    tokio::spawn(media_server);
+
+    // 保持主线程运行
+    tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
+
+    Ok(())
 }
