@@ -16,8 +16,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 use download::download_file;
 use display_remote::{
-    DLNAPlayer, discover_devices, connect_device, 
-    play_video, pause_video, resume_video, stop_video, get_status, serve_media, hello
+    DLNAPlayer, discovered_devices, 
+    play_video, pause_video, resume_video, stop_video,  serve_media, hello
 };
 use actix_files as fs;
 
@@ -125,13 +125,11 @@ async fn main() -> std::io::Result<()> {
 
         // 添加 DLNA 相关路由并返回完整的 app
         app
-            .route("/dlna/devices", web::get().to(discover_devices))
-            .route("/dlna/connect", web::post().to(connect_device))
+            .route("/dlna/devices", web::get().to(discovered_devices))
             .route("/dlna/play", web::post().to(play_video))
             .route("/dlna/pause", web::post().to(pause_video))
             .route("/dlna/resume", web::post().to(resume_video))
             .route("/dlna/stop", web::post().to(stop_video))
-            .route("/dlna/status", web::get().to(get_status))
             .route("/media/{filename:.*}", web::get().to(serve_media))
             .route("/hello", web::get().to(hello))
     })
