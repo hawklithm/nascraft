@@ -20,15 +20,28 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DeviceState {
+    #[serde(default)]
     pub playback: i32,
+    #[serde(default)]
     pub mute: bool,
+    #[serde(default)]
     pub volume: i32,
+    #[serde(default = "empty_string")]
     pub position: String,
+    #[serde(default = "empty_string")]
     pub duration: String,
+    #[serde(default)]
     pub buffer: i32,
+    #[serde(default = "empty_string")]
     pub name: String,
+    #[serde(default = "empty_string")]
     pub uri: String,
+    #[serde(default = "empty_string")]
     pub metadata: String,
+}
+
+fn empty_string() -> String {
+    String::new()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,6 +160,7 @@ impl SSEListener {
     async fn handle_event(&self, event_type: &str, data: &str) -> Result<(), String> {
         match event_type {
             "message" => {
+                debug!("Parsing message data: {}", data);
                 match serde_json::from_str::<DeviceMessage>(data) {
                     Ok(msg) => {
                         match msg.action.as_str() {
@@ -162,7 +176,7 @@ impl SSEListener {
                         }
                     }
                     Err(e) => {
-                        error!("解析设备消息失败: {}", e);
+                        error!("解析设备消息失败: {} - 原始数据: {}", e, data);
                     }
                 }
             }
