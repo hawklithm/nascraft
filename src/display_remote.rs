@@ -331,7 +331,7 @@ pub async fn discovered_devices(
         .collect();
 
     info!("Returning {} devices in response", device_responses.len());
-    Ok(HttpResponse::Ok().json(device_responses))
+    Ok(HttpResponse::Ok().json(ApiResponse::success(device_responses)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -356,11 +356,14 @@ pub async fn play_video(
     match player.send_control_request(req.device_id, "mediaid", Some(req.media_id.clone())).await {
         Ok(_) => {
             info!("Play video request sent successfully");
-            Ok(HttpResponse::Ok().body("Play request sent successfully"))
+            Ok(HttpResponse::Ok().json(ApiResponse::<()>::success(())))
         }
         Err(e) => {
             error!("Failed to send play request: {}", e);
-            Ok(HttpResponse::InternalServerError().body(e))
+            Ok(HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                "500".to_string(),
+                e,
+            )))
         }
     }
 }
@@ -375,11 +378,14 @@ pub async fn pause_video(
     match player.send_control_request(req.device_id, "pause", None).await {
         Ok(_) => {
             info!("Pause request sent successfully");
-            Ok(HttpResponse::Ok().body("Pause request sent successfully"))
+            Ok(HttpResponse::Ok().json(ApiResponse::<()>::success(())))
         }
         Err(e) => {
             error!("Failed to send pause request: {}", e);
-            Ok(HttpResponse::InternalServerError().body(e))
+            Ok(HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                "500".to_string(),
+                e,
+            )))
         }
     }
 }
@@ -394,11 +400,14 @@ pub async fn resume_video(
     match player.send_control_request(req.device_id, "play", None).await {
         Ok(_) => {
             info!("Resume request sent successfully");
-            Ok(HttpResponse::Ok().body("Resume request sent successfully"))
+            Ok(HttpResponse::Ok().json(ApiResponse::<()>::success(())))
         }
         Err(e) => {
             error!("Failed to send resume request: {}", e);
-            Ok(HttpResponse::InternalServerError().body(e))
+            Ok(HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                "500".to_string(),
+                e,
+            )))
         }
     }
 }
@@ -413,11 +422,14 @@ pub async fn stop_video(
     match player.send_control_request(req.device_id, "stop", None).await {
         Ok(_) => {
             info!("Stop request sent successfully");
-            Ok(HttpResponse::Ok().body("Stop request sent successfully"))
+            Ok(HttpResponse::Ok().json(ApiResponse::<()>::success(())))
         }
         Err(e) => {
             error!("Failed to send stop request: {}", e);
-            Ok(HttpResponse::InternalServerError().body(e))
+            Ok(HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                "500".to_string(),
+                e,
+            )))
         }
     }
 }
