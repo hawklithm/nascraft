@@ -17,6 +17,8 @@ use std::convert::TryFrom;
 use reqwest;
 use tokio::sync::broadcast;
 use std::collections::HashMap;
+use uuid;
+use crate::helper::ApiResponse;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DeviceState {
@@ -249,6 +251,51 @@ impl DLNAPlayer {
         info!("Control request completed successfully");
         Ok(())
     }
+
+    pub async fn browse_files(&self, id: String) -> Result<ApiResponse<BrowseResponse>, String> {
+        info!("Browsing files with ID: {}", id);
+        
+        let client = reqwest::Client::new();
+        let base_url = format!("http://localhost:{}", self.media_server_port);
+        
+        let request_body = serde_json::json!({
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "id": id,
+            "lang": "zh-CN"
+        });
+
+        let request_url = format!("{}/v1/api/player/browse", base_url);
+        info!("Sending browse request to: {}", request_url);
+        debug!("Request payload: {}", serde_json::to_string_pretty(&request_body).unwrap());
+
+        let response = client.post(&request_url)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send browse request: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            error!("Browse request failed: {}", error_text);
+            return Ok(ApiResponse::error("500".to_string(), format!("Browse request failed: {}", error_text)));
+        }
+
+        let response_text = response.text().await
+            .map_err(|e| format!("Failed to get response text: {}", e))?;
+        info!("Browse response: {}", response_text);
+
+        match serde_json::from_str::<BrowseResponse>(&response_text) {
+            Ok(browse_response) => {
+                info!("Successfully retrieved file list");
+                Ok(ApiResponse::success(browse_response))
+            }
+            Err(e) => {
+                error!("Failed to parse browse response: {}", e);
+                Ok(ApiResponse::error("500".to_string(), format!("Failed to parse browse response: {}", e)))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -402,4 +449,87 @@ pub enum TransportState {
     Paused,
     Stopped,
     Unknown,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MediaItem {
+    pub goal: String,
+    pub name: String,
+    #[serde(rename = "updateId")]
+    pub update_id: String,
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct MediaSelections {
+    #[serde(rename = "recentlyAdded", default)]
+    pub recently_added: Vec<MediaItem>,
+    #[serde(rename = "recentlyPlayed", default)]
+    pub recently_played: Vec<MediaItem>,
+    #[serde(rename = "inProgress", default)]
+    pub in_progress: Vec<MediaItem>,
+    #[serde(rename = "mostPlayed", default)]
+    pub most_played: Vec<MediaItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Breadcrumb {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BrowseResponse {
+    #[serde(default)]
+    pub goal: String,
+    #[serde(rename = "mediasSelections", default)]
+    pub medias_selections: MediaSelections,
+    #[serde(default)]
+    pub umsversion: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(rename = "hasFile", default)]
+    pub has_file: bool,
+    #[serde(rename = "useWebControl", default)]
+    pub use_web_control: bool,
+    #[serde(default)]
+    pub breadcrumbs: Vec<Breadcrumb>,
+    #[serde(default)]
+    pub folders: Vec<Folder>,
+    #[serde(default)]
+    pub medias: Vec<MediaItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BrowseRequest {
+    pub id: String,
+}
+
+pub async fn browse_files(
+    dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
+    req: web::Json<BrowseRequest>,
+) -> Result<HttpResponse, Error> {
+    info!("Handling browse files request - ID: {}", req.id);
+    
+    let player = dlna_player.lock().await;
+    match player.browse_files(req.id.clone()).await {
+        Ok(response) => {
+            info!("Browse files request completed successfully");
+            Ok(HttpResponse::Ok().json(response))
+        }
+        Err(e) => {
+            error!("Failed to browse files: {}", e);
+            Ok(HttpResponse::InternalServerError().json(ApiResponse::<BrowseResponse>::error(
+                "500".to_string(),
+                e,
+            )))
+        }
+    }
 } 

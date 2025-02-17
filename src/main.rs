@@ -3,6 +3,7 @@ mod upload;
 mod upload_dao;
 mod download;
 mod display_remote;
+mod helper;
 
 use actix_web::{web, App, HttpServer};
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 use download::download_file;
 use display_remote::{
     DLNAPlayer, discovered_devices, 
-    play_video, pause_video, resume_video, stop_video,  serve_media, hello
+    play_video, pause_video, resume_video, stop_video, serve_media, hello, browse_files
 };
 use actix_files as fs;
 
@@ -130,6 +131,7 @@ async fn main() -> std::io::Result<()> {
             .route("/dlna/pause", web::post().to(pause_video))
             .route("/dlna/resume", web::post().to(resume_video))
             .route("/dlna/stop", web::post().to(stop_video))
+            .route("/dlna/browse", web::post().to(browse_files))
             .route("/media/{filename:.*}", web::get().to(serve_media))
             .route("/hello", web::get().to(hello))
     })
