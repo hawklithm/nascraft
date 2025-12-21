@@ -9,7 +9,7 @@ Nascraft is a web application designed to handle file uploads efficiently using 
 - **Chunked File Uploads**: Upload large files in smaller chunks to improve reliability and performance.
 - **File Metadata Management**: Store and manage metadata for each uploaded file, including filename, total size, and checksum.
 - **Upload Progress Tracking**: Track the progress of each file upload, ensuring that all parts are received before final assembly.
-- **Database Integration**: Use MySQL for storing file metadata and upload progress, with support for database initialization and structure checks.
+- **Database Integration**: Use SQLite for storing file metadata and upload progress, with support for database initialization and structure checks.
 - **Asynchronous Processing**: Leverage Rust's asynchronous capabilities for efficient file handling and database operations.
 - **Query Uploaded Files**: Retrieve a list of uploaded files with support for pagination, filtering by status, sorting, and total count.
 
@@ -22,7 +22,6 @@ The frontend code for Nascraft is available in a separate repository. You can fi
 ### Prerequisites
 
 - Rust (latest stable version)
-- MySQL database
 - Cargo (Rust package manager)
 
 ### Installation
@@ -34,9 +33,8 @@ The frontend code for Nascraft is available in a separate repository. You can fi
    cd nascraft
    ```
 
-2. Set up the MySQL database:
+2. Set up the SQLite database:
 
-   - Create a database named `nascraft`.
    - Run the SQL scripts in `init.sql` and `init_sys.sql` to set up the necessary tables.
 
 3. Configure environment variables:
@@ -45,13 +43,13 @@ The frontend code for Nascraft is available in a separate repository. You can fi
 
    ```env
    # Database Configuration
-   DATABASE_URL=mysql://user:password@localhost/nascraft
+   DATABASE_URL=sqlite://nascraft.db
    LOG_FILE_PATH=logs/nascraft.log
    SQLX_OFFLINE=true
 
    # Table Structure Configuration
-   EXPECTED_COLUMNS_UPLOAD_FILE_META=id:bigint,file_id:varchar,filename:varchar,total_size:bigint,checksum:varchar,status:int,file_path:varchar
-   EXPECTED_COLUMNS_UPLOAD_PROGRESS=id:bigint,file_id:varchar,checksum:varchar,filename:varchar,total_size:bigint,uploaded_size:bigint,start_offset:bigint,end_offset:bigint,last_updated:bigint
+   EXPECTED_COLUMNS_UPLOAD_FILE_META=id:integer,file_id:text,filename:text,total_size:integer,checksum:text,status:int,file_path:text,last_updated:integer
+   EXPECTED_COLUMNS_UPLOAD_PROGRESS=id:integer,file_id:text,checksum:text,filename:text,total_size:integer,uploaded_size:integer,start_offset:integer,end_offset:integer,last_updated:integer
    ```
 
 4. Build and run the application:
@@ -143,7 +141,7 @@ The application requires several environment variables to be set in a `.env` fil
 
 ```env
 # Database Configuration
-DATABASE_URL=mysql://user:password@localhost/nascraft
+DATABASE_URL=sqlite://nascraft.db
 LOG_FILE_PATH=logs/nascraft.log
 SQLX_OFFLINE=true
 
@@ -155,7 +153,7 @@ EXPECTED_COLUMNS_UPLOAD_PROGRESS=id:bigint,file_id:varchar,checksum:varchar,file
 #### Environment Variables Description
 
 - **Database Configuration**
-  - `DATABASE_URL`: MySQL database connection string
+  - `DATABASE_URL`: SQLite database connection string
   - `LOG_FILE_PATH`: Path where application logs will be written
   - `SQLX_OFFLINE`: Enable SQLx offline mode
 

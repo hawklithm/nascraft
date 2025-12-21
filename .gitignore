@@ -1,7 +1,6 @@
 /target
-# Ignore .env file
-.env
 /uploads
 /logs
 /log
 /media
+/data

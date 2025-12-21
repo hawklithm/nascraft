@@ -1,21 +1,23 @@
-use sqlx::{MySql, MySqlPool, Transaction, Row};
-use sqlx::query;
+use sqlx::{Sqlite, SqlitePool, Transaction, Row};
 use log::{error, info};
-use sqlx::types::BigDecimal;
-use bigdecimal::ToPrimitive;
 use serde::Serialize;
 use sqlx::FromRow;
 use chrono;
 
-pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(String, String, i64, i32, String), String> {
-    match query!(
-        "SELECT filename, checksum, total_size, status, file_path FROM upload_file_meta WHERE file_id = ?",
-        file_id
-    )
-    .fetch_one(db_pool)
-    .await
+pub async fn fetch_file_record(db_pool: &SqlitePool, file_id: &str) -> Result<(String, String, i64, i32, String), String> {
+    match sqlx::query("SELECT filename, checksum, total_size, status, file_path FROM upload_file_meta WHERE file_id = ?")
+        .bind(file_id)
+        .fetch_one(db_pool)
+        .await
     {
-        Ok(record) => Ok((record.filename, record.checksum, record.total_size, record.status.unwrap_or(0), record.file_path)),
+        Ok(row) => {
+            let filename: String = row.get("filename");
+            let checksum: String = row.get("checksum");
+            let total_size: i64 = row.get("total_size");
+            let status: Option<i32> = row.try_get("status").ok();
+            let file_path: String = row.get("file_path");
+            Ok((filename, checksum, total_size, status.unwrap_or(0), file_path))
+        }
         Err(e) => {
             error!("Failed to fetch file record: {}", e);
             Err("Failed to fetch file record".to_string())
@@ -23,16 +25,14 @@ pub async fn fetch_file_record(db_pool: &MySqlPool, file_id: &str) -> Result<(St
     }
 }
 
-pub async fn update_upload_progress(db_pool: &MySqlPool, uploaded_size: u64, checksum: &str, file_id: &str, start_offset: u64) -> Result<(), String> {
-    if let Err(e) = query!(
-        "UPDATE upload_progress SET uploaded_size = ?, checksum = ? WHERE file_id = ? AND start_offset = ?",
-        uploaded_size,
-        checksum,
-        file_id,
-        start_offset
-    )
-    .execute(db_pool)
-    .await
+pub async fn update_upload_progress(db_pool: &SqlitePool, uploaded_size: u64, checksum: &str, file_id: &str, start_offset: u64) -> Result<(), String> {
+    if let Err(e) = sqlx::query("UPDATE upload_progress SET uploaded_size = ?, checksum = ? WHERE file_id = ? AND start_offset = ?")
+        .bind(uploaded_size as i64)
+        .bind(checksum)
+        .bind(file_id)
+        .bind(start_offset as i64)
+        .execute(db_pool)
+        .await
     {
         error!("Failed to update upload progress: {}", e);
         return Err("Failed to update upload progress".to_string());
@@ -40,15 +40,16 @@ pub async fn update_upload_progress(db_pool: &MySqlPool, uploaded_size: u64, che
     Ok(())
 }
 
-pub async fn get_total_uploaded(db_pool: &MySqlPool, file_id: &str) -> Result<u64, String> {
-    match query!(
-        "SELECT SUM(uploaded_size) as total_uploaded FROM upload_progress WHERE file_id = ?",
-        file_id
-    )
-    .fetch_one(db_pool)
-    .await
+pub async fn get_total_uploaded(db_pool: &SqlitePool, file_id: &str) -> Result<u64, String> {
+    match sqlx::query("SELECT COALESCE(SUM(uploaded_size), 0) as total_uploaded FROM upload_progress WHERE file_id = ?")
+        .bind(file_id)
+        .fetch_one(db_pool)
+        .await
     {
-        Ok(row) => Ok(row.total_uploaded.unwrap_or_else(|| BigDecimal::from(0)).to_u64().unwrap_or(0)),
+        Ok(row) => {
+            let total_uploaded: i64 = row.get("total_uploaded");
+            Ok(total_uploaded.max(0) as u64)
+        }
         Err(e) => {
             error!("Failed to get total uploaded size: {}", e);
             Err("Failed to get total uploaded size".to_string())
@@ -57,7 +58,7 @@ pub async fn get_total_uploaded(db_pool: &MySqlPool, file_id: &str) -> Result<u6
 }
 
 pub async fn update_file_status_and_path(
-    db_pool: &MySqlPool,
+    db_pool: &SqlitePool,
     file_id: &str,
     current_status: i32,
     new_status: i32,
@@ -66,16 +67,14 @@ pub async fn update_file_status_and_path(
     // Get current timestamp
     let current_time = chrono::Utc::now().timestamp();
 
-    if let Err(e) = query!(
-        "UPDATE upload_file_meta SET status = ?, file_path = ?, last_updated = ? WHERE file_id = ? AND status = ?",
-        new_status,
-        file_path,
-        current_time,
-        file_id,
-        current_status
-    )
-    .execute(db_pool)
-    .await
+    if let Err(e) = sqlx::query("UPDATE upload_file_meta SET status = ?, file_path = ?, last_updated = ? WHERE file_id = ? AND status = ?")
+        .bind(new_status)
+        .bind(file_path)
+        .bind(current_time)
+        .bind(file_id)
+        .bind(current_status)
+        .execute(db_pool)
+        .await
     {
         error!("Failed to update file status and path: {}", e);
         return Err("Failed to update file status and path".to_string());
@@ -83,14 +82,15 @@ pub async fn update_file_status_and_path(
     Ok(())
 }
 
-pub async fn fetch_chunk_size(db_pool: &MySqlPool) -> Result<u64, String> {
-    match query!(
-        "SELECT config_value FROM system_config WHERE config_key = 'chunk_size'"
-    )
-    .fetch_one(db_pool)
-    .await
+pub async fn fetch_chunk_size(db_pool: &SqlitePool) -> Result<u64, String> {
+    match sqlx::query("SELECT config_value FROM system_config WHERE config_key = 'chunk_size'")
+        .fetch_one(db_pool)
+        .await
     {
-        Ok(row) => row.config_value.parse().map_err(|_| "Invalid chunk size".to_string()),
+        Ok(row) => {
+            let config_value: String = row.get("config_value");
+            config_value.parse().map_err(|_| "Invalid chunk size".to_string())
+        }
         Err(e) => {
             error!("Failed to fetch chunk size: {}", e);
             Err("Failed to fetch chunk size".to_string())
@@ -99,7 +99,7 @@ pub async fn fetch_chunk_size(db_pool: &MySqlPool) -> Result<u64, String> {
 }
 
 pub async fn initialize_upload_progress(
-    tx: &mut Transaction<'_, MySql>,
+    tx: &mut Transaction<'_, Sqlite>,
     file_id: &str,
     safe_filename: &str,
     total_size: u64,
@@ -112,10 +112,10 @@ pub async fn initialize_upload_progress(
     .bind(file_id)
     .bind("") // Initial checksum is empty
     .bind(safe_filename)
-    .bind(total_size)
+    .bind(total_size as i64)
     .bind(0) // Initial uploaded size is 0
-    .bind(start_offset)
-    .bind(end_offset)
+    .bind(start_offset as i64)
+    .bind(end_offset as i64)
     .execute(&mut **tx)
     .await
     {
@@ -126,7 +126,7 @@ pub async fn initialize_upload_progress(
 }
 
 pub async fn save_upload_state_to_db(
-    tx: &mut Transaction<'_, MySql>,
+    tx: &mut Transaction<'_, Sqlite>,
     file_id: &str,
     filename: &str,
     total_size: u64,
@@ -138,7 +138,7 @@ pub async fn save_upload_state_to_db(
     )
     .bind(file_id)
     .bind(filename)
-    .bind(total_size)
+    .bind(total_size as i64)
     .bind(checksum)
     .bind(file_path)
     .execute(&mut **tx)
@@ -164,7 +164,7 @@ pub struct UploadedFile {
 }
 
 pub async fn fetch_uploaded_files(
-    db_pool: &MySqlPool,
+    db_pool: &SqlitePool,
     page: u32,
     page_size: u32,
     status: Option<i32>,
@@ -205,14 +205,14 @@ pub async fn fetch_uploaded_files(
     }
 }
 
-pub async fn fetch_total_uploaded_files(db_pool: &MySqlPool, status: Option<i32>) -> Result<i64, String> {
+pub async fn fetch_total_uploaded_files(db_pool: &SqlitePool, status: Option<i32>) -> Result<i64, String> {
     let mut query_str = "SELECT COUNT(*) as total FROM upload_file_meta WHERE 1=1".to_string();
 
     if let Some(status) = status {
         query_str.push_str(&format!(" AND status = {}", status));
     }
 
-    match query(&query_str)
+    match sqlx::query(&query_str)
         .fetch_one(db_pool)
         .await
     {
@@ -232,11 +232,11 @@ pub struct ChunkProgress {
     pub last_updated: i64,
 }
 
-pub async fn fetch_upload_progress(db_pool: &MySqlPool, file_id: &str) -> Result<Vec<ChunkProgress>, String> {
+pub async fn fetch_upload_progress(db_pool: &SqlitePool, file_id: &str) -> Result<Vec<ChunkProgress>, String> {
     match sqlx::query_as::<_, ChunkProgress>(
-        &format!("SELECT start_offset, end_offset, uploaded_size, last_updated FROM upload_progress WHERE file_id = {}",
-        file_id)
+        "SELECT start_offset, end_offset, uploaded_size, last_updated FROM upload_progress WHERE file_id = ?"
     )
+    .bind(file_id)
     .fetch_all(db_pool)
     .await
     {

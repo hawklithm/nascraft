@@ -5,35 +5,32 @@ mod download;
 mod display_remote;
 mod helper;
 
-use actix_web::{web, App, HttpServer};
+use axum::{routing::{get, post}, Router};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use log::{error, info};
 use upload::{upload_file, submit_file_metadata, AppState, get_uploaded_files, get_upload_status};
-use init_env::{init_db_pool, check_table_structure_endpoint, ensure_table_structure_endpoint};
+use init_env::init_db_pool;
 use simplelog::*;
 use std::env;
 use std::path::{Path, PathBuf};
 use download::download_file;
 use display_remote::{
-    DLNAPlayer, discovered_devices, 
-    play_video, pause_video, resume_video, stop_video, serve_media, hello, browse_files
+    DLNAPlayer, discovered_devices,
+    play_video, pause_video, resume_video, stop_video, hello, browse_files
 };
-use actix_files as fs;
+use tower_http::services::ServeDir;
 
-#[actix_web::main]
+#[derive(Clone)]
+pub struct AppContext {
+    pub app_state: Arc<AppState>,
+    pub dlna_player: Arc<Mutex<DLNAPlayer>>,
+}
+
+#[tokio::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok(); // 加载 .env 文件
-
-    // 检查是否存在 DATABASE_URL
-    let has_database = match env::var("DATABASE_URL") {
-        Ok(_) => true,
-        Err(_) => {
-            info!("DATABASE_URL not found, skipping database initialization");
-            false
-        }
-    };
 
     // 设置日志输出
     let log_file_path = match env::var("LOG_FILE_PATH") {
@@ -81,77 +78,66 @@ async fn main() -> std::io::Result<()> {
         return Err(e);
     }
 
-    // 根据 has_database 决定是否初始化数据库
-    let db_pool = if has_database {
-        match init_db_pool().await {
-            Ok(pool) => Some(pool),
-            Err(e) => {
-                error!("Failed to initialize database pool: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // DATABASE_URL is required
+    if env::var("DATABASE_URL").is_err() {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "DATABASE_URL must be set"));
+    }
+
+    // Initialize DB pool and ensure tables on startup
+    let db_pool = init_db_pool()
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to initialize database pool: {}", e)))?;
 
     let app_state = Arc::new(AppState {
         uploads: Mutex::new(HashMap::new()),
-        db_pool: db_pool.clone(),
+        db_pool,
     });
 
     // 创建DLNA播放器实例
     let dlna_player = Arc::new(Mutex::new(DLNAPlayer::new().await));
 
+    let ctx = AppContext {
+        app_state: app_state.clone(),
+        dlna_player: dlna_player.clone(),
+    };
+
     info!("Starting server at http://127.0.0.1:8080");
     println!("Starting server at http://127.0.0.1:8080");
 
-    // 启动主服务器
-    let main_server = HttpServer::new(move || {
-        let mut app = App::new()
-            .app_data(web::Data::new(app_state.clone()))
-            .app_data(web::Data::new(dlna_player.clone()))
-            .route("/upload", web::post().to(upload_file));
+    // Main API server
+    let app = Router::new()
+        .route("/api/upload", post(upload_file))
+        .route("/api/submit_metadata", post(submit_file_metadata))
+        .route("/api/upload_status/:file_id", get(get_upload_status))
+        .route("/api/download/:file_id", get(download_file))
+        .route("/api/uploaded_files", get(get_uploaded_files))
+        .route("/dlna/devices", get(discovered_devices))
+        .route("/dlna/play", post(play_video))
+        .route("/dlna/pause", post(pause_video))
+        .route("/dlna/resume", post(resume_video))
+        .route("/dlna/stop", post(stop_video))
+        .route("/dlna/browse", post(browse_files))
+        .route("/hello", get(hello))
+        .with_state(ctx.clone());
 
-        // 只有在有数据库连接时才添加数据库相关路由
-        if has_database {
-            app = app
-                .app_data(web::Data::new(db_pool.clone().unwrap()))
-                .route("/submit_metadata", web::post().to(submit_file_metadata))
-                .route("/check_table_structure", web::get().to(check_table_structure_endpoint))
-                .route("/ensure_table_structure", web::post().to(ensure_table_structure_endpoint))
-                .route("/upload_status/{file_id}", web::get().to(get_upload_status))
-                .route("/download/{file_id}", web::get().to(download_file))
-                .route("/uploaded_files", web::get().to(get_uploaded_files));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
+
+    // Media static server (for DLNA)
+    let media_app = Router::new().nest_service("/", ServeDir::new("./media"));
+    let media_listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            error!("Main server error: {}", e);
         }
+    });
 
-        // 添加 DLNA 相关路由并返回完整的 app
-        app
-            .route("/dlna/devices", web::get().to(discovered_devices))
-            .route("/dlna/play", web::post().to(play_video))
-            .route("/dlna/pause", web::post().to(pause_video))
-            .route("/dlna/resume", web::post().to(resume_video))
-            .route("/dlna/stop", web::post().to(stop_video))
-            .route("/dlna/browse", web::post().to(browse_files))
-            .route("/media/{filename:.*}", web::get().to(serve_media))
-            .route("/hello", web::get().to(hello))
-    })
-    .bind("127.0.0.1:8080")?
-    .run();
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(media_listener, media_app).await {
+            error!("Media server error: {}", e);
+        }
+    });
 
-    // 启动媒体服务器
-    let media_server = HttpServer::new(|| {
-        App::new()
-            .service(fs::Files::new("/", "./media").show_files_listing())
-    })
-    .bind("0.0.0.0:8081")?
-    .run();
-
-    // 使用 tokio::spawn 启动两个服务器
-    tokio::spawn(main_server);
-    tokio::spawn(media_server);
-
-    // 保持主线程运行
     tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
-
     Ok(())
 }

@@ -2,18 +2,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use log::{info, error, debug};
 use local_ip_address::local_ip;
-use actix_web::{web, HttpResponse, Error};
-use actix_files::NamedFile;
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use rupnp::ssdp::SearchTarget;
 use rupnp::{Device, Service};
 use std::str::FromStr;
 use rupnp::ssdp::URN;
 use futures::StreamExt;
-use actix_web::http::Uri;
 use tokio::sync::Mutex;
 use std::sync::Arc;
-use std::convert::TryFrom;
 use reqwest;
 use tokio::sync::broadcast;
 use std::collections::HashMap;
@@ -309,10 +311,10 @@ pub struct DeviceResponse {
 }
 
 pub async fn discovered_devices(
-    dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
-) -> Result<HttpResponse, Error> {
+    State(ctx): State<crate::AppContext>,
+) -> impl IntoResponse {
     info!("Handling device discovery request");
-    let player = dlna_player.lock().await;
+    let player = ctx.dlna_player.lock().await;
     let devices = player.sse_listener.get_devices().await;
     
     info!("Converting device messages to response format");
@@ -331,7 +333,7 @@ pub async fn discovered_devices(
         .collect();
 
     info!("Returning {} devices in response", device_responses.len());
-    Ok(HttpResponse::Ok().json(ApiResponse::success(device_responses)))
+    (StatusCode::OK, Json(ApiResponse::success(device_responses))).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,113 +348,97 @@ pub struct DeviceControlRequest {
 }
 
 pub async fn play_video(
-    dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
-    req: web::Json<PlayVideoRequest>,
-) -> Result<HttpResponse, Error> {
+    State(ctx): State<crate::AppContext>,
+    Json(req): Json<PlayVideoRequest>,
+) -> impl IntoResponse {
     info!("Handling play video request - Device ID: {}, Media ID: {}", 
         req.device_id, req.media_id);
     
-    let player = dlna_player.lock().await;
+    let player = ctx.dlna_player.lock().await;
     match player.send_control_request(req.device_id, "mediaid", Some(req.media_id.clone())).await {
         Ok(_) => {
             info!("Play video request sent successfully");
-            Ok(HttpResponse::Ok().json(ApiResponse::<()>::success(())))
+            (StatusCode::OK, Json(ApiResponse::<()>::success(()))).into_response()
         }
         Err(e) => {
             error!("Failed to send play request: {}", e);
-            Ok(HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
                 "500".to_string(),
                 e,
-            )))
+            ))).into_response()
         }
     }
 }
 
 pub async fn pause_video(
-    dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
-    req: web::Json<DeviceControlRequest>,
-) -> Result<HttpResponse, Error> {
+    State(ctx): State<crate::AppContext>,
+    Json(req): Json<DeviceControlRequest>,
+) -> impl IntoResponse {
     info!("Handling pause video request - Device ID: {}", req.device_id);
     
-    let player = dlna_player.lock().await;
+    let player = ctx.dlna_player.lock().await;
     match player.send_control_request(req.device_id, "pause", None).await {
         Ok(_) => {
             info!("Pause request sent successfully");
-            Ok(HttpResponse::Ok().json(ApiResponse::<()>::success(())))
+            (StatusCode::OK, Json(ApiResponse::<()>::success(()))).into_response()
         }
         Err(e) => {
             error!("Failed to send pause request: {}", e);
-            Ok(HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
                 "500".to_string(),
                 e,
-            )))
+            ))).into_response()
         }
     }
 }
 
 pub async fn resume_video(
-    dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
-    req: web::Json<DeviceControlRequest>,
-) -> Result<HttpResponse, Error> {
+    State(ctx): State<crate::AppContext>,
+    Json(req): Json<DeviceControlRequest>,
+) -> impl IntoResponse {
     info!("Handling resume video request - Device ID: {}", req.device_id);
     
-    let player = dlna_player.lock().await;
+    let player = ctx.dlna_player.lock().await;
     match player.send_control_request(req.device_id, "play", None).await {
         Ok(_) => {
             info!("Resume request sent successfully");
-            Ok(HttpResponse::Ok().json(ApiResponse::<()>::success(())))
+            (StatusCode::OK, Json(ApiResponse::<()>::success(()))).into_response()
         }
         Err(e) => {
             error!("Failed to send resume request: {}", e);
-            Ok(HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
                 "500".to_string(),
                 e,
-            )))
+            ))).into_response()
         }
     }
 }
 
 pub async fn stop_video(
-    dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
-    req: web::Json<DeviceControlRequest>,
-) -> Result<HttpResponse, Error> {
+    State(ctx): State<crate::AppContext>,
+    Json(req): Json<DeviceControlRequest>,
+) -> impl IntoResponse {
     info!("Handling stop video request - Device ID: {}", req.device_id);
     
-    let player = dlna_player.lock().await;
+    let player = ctx.dlna_player.lock().await;
     match player.send_control_request(req.device_id, "stop", None).await {
         Ok(_) => {
             info!("Stop request sent successfully");
-            Ok(HttpResponse::Ok().json(ApiResponse::<()>::success(())))
+            (StatusCode::OK, Json(ApiResponse::<()>::success(()))).into_response()
         }
         Err(e) => {
             error!("Failed to send stop request: {}", e);
-            Ok(HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
                 "500".to_string(),
                 e,
-            )))
+            ))).into_response()
         }
     }
 }
 
-// 新增：处理媒体文件的请求
-pub async fn serve_media(path: web::Path<String>) -> Result<NamedFile, Error> {
-    let media_path = PathBuf::from("media").join(path.into_inner());
-    info!("Serving media file: {}", media_path.display());
-    match NamedFile::open(&media_path) {
-        Ok(file) => {
-            info!("Media file served successfully");
-            Ok(file)
-        }
-        Err(e) => {
-            error!("Failed to serve media file: {}", e);
-            Err(Error::from(e))
-        }
-    }
-}
-
-pub async fn hello() -> Result<HttpResponse, Error> {
+pub async fn hello() -> impl IntoResponse {
     info!("Handling health check request");
-    Ok(HttpResponse::Ok().body("Service is alive"))
+    (StatusCode::OK, "Service is alive").into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -525,23 +511,23 @@ pub struct BrowseRequest {
 }
 
 pub async fn browse_files(
-    dlna_player: web::Data<Arc<Mutex<DLNAPlayer>>>,
-    req: web::Json<BrowseRequest>,
-) -> Result<HttpResponse, Error> {
-    info!("Handling browse files request - ID: {}", req.id);
+    State(ctx): State<crate::AppContext>,
+    Json(req): Json<BrowseRequest>,
+) -> impl IntoResponse {
+    info!("Handling browse request - ID: {}", req.id);
     
-    let player = dlna_player.lock().await;
-    match player.browse_files(req.id.clone()).await {
+    let player = ctx.dlna_player.lock().await;
+    match player.browse_files(req.id).await {
         Ok(response) => {
-            info!("Browse files request completed successfully");
-            Ok(HttpResponse::Ok().json(response))
+            info!("Browse request successful");
+            (StatusCode::OK, Json(response)).into_response()
         }
         Err(e) => {
-            error!("Failed to browse files: {}", e);
-            Ok(HttpResponse::InternalServerError().json(ApiResponse::<BrowseResponse>::error(
+            error!("Browse request failed: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
                 "500".to_string(),
                 e,
-            )))
+            ))).into_response()
         }
     }
-} 
+}

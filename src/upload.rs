@@ -1,9 +1,14 @@
-use actix_web::{web, HttpRequest, HttpResponse, Result};
+use axum::{
+    body::Body,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    Json,
+};
 use futures::StreamExt;
 use sha2::{Sha256, Digest as ShaDigest};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, AsyncReadExt};
-use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
@@ -11,23 +16,24 @@ use serde_json::json;
 use log::{error, info};
 use sanitize_filename::sanitize;
 use uuid::Uuid;
-use sqlx::{MySqlPool, Transaction, MySql};
+use sqlx::{SqlitePool, Transaction, Sqlite};
 use crate::init_env::check_system_initialized;
 use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress};
 use chrono::Utc;
 use md5::Md5;
+use crate::AppContext;
 
 #[derive(Debug)]
 pub struct AppState {
     pub uploads: Mutex<HashMap<String, UploadState>>,
-    pub db_pool: Option<MySqlPool>,
+    pub db_pool: SqlitePool,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             uploads: Mutex::new(HashMap::new()),
-            db_pool: None,
+            db_pool: SqlitePool::connect_lazy("sqlite::memory:").expect("failed to create default sqlite pool"),
         }
     }
 }
@@ -41,7 +47,7 @@ pub struct UploadState {
 }
 
 impl UploadState {
-    pub async fn save_to_db(&self, tx: &mut Transaction<'_, MySql>, file_path: &str) -> Result<(), String> {
+    pub async fn save_to_db(&self, tx: &mut Transaction<'_, Sqlite>, file_path: &str) -> Result<(), String> {
         save_upload_state_to_db(tx, &self.id, &self.filename, self.total_size, &self.checksum, file_path).await
     }
 }
@@ -75,63 +81,63 @@ impl<T> ApiResponse<T> {
 }
 
 pub async fn upload_file(
-    req: HttpRequest,
-    mut payload: web::Payload,
-    data: web::Data<Arc<AppState>>,
-) -> HttpResponse {
-    let db_pool = data.db_pool.as_ref().unwrap();
+    State(ctx): State<AppContext>,
+    headers: HeaderMap,
+    body: Body,
+) -> impl IntoResponse {
+    let db_pool = &ctx.app_state.db_pool;
     if let Err(_) = check_system_initialized(db_pool).await {
-        return HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(
             "System not initialized",
             "SYSTEM_NOT_INITIALIZED"
-        ));
+        ))).into_response();
     }
 
 
-    let file_id = match req.headers()
+    let file_id = match headers
         .get("X-File-ID")
         .and_then(|h| h.to_str().ok()) {
             Some(id) => id.to_string(),
             None => {
-                return HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+                return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(
                     "Missing file ID",
                     "MISSING_FILE_ID"
-                ));
+                ))).into_response();
             }
         };
 
-    let start_offset = match req.headers()
+    let start_offset = match headers
         .get("X-Start-Offset")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.parse::<u64>().ok()) {
             Some(offset) => offset,
             None => {
                 error!("Missing or invalid start offset");
-                return HttpResponse::BadRequest().body("Missing or invalid start offset");
+                return (StatusCode::BAD_REQUEST, "Missing or invalid start offset").into_response();
             }
         };
 
     let (filename, _, total_size, _, _) = match fetch_file_record(db_pool, &file_id).await {
         Ok(record) => record,
-        Err(e) => return HttpResponse::InternalServerError().body(e),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
     let safe_filename = sanitize(&filename);
     let total_size = total_size as u64;
 
-    let content_length = match req.headers()
-        .get(actix_web::http::header::CONTENT_LENGTH)
+    let content_length = match headers
+        .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.parse::<u64>().ok()) {
             Some(len) => len,
             None => {
                 error!("Invalid content length");
-                return HttpResponse::BadRequest().body("Invalid content length");
+                return (StatusCode::BAD_REQUEST, "Invalid content length").into_response();
             }
         };
 
-    let content_range = req.headers()
-        .get(actix_web::http::header::CONTENT_RANGE)
+    let content_range = headers
+        .get(axum::http::header::CONTENT_RANGE)
         .and_then(|h| h.to_str().ok());
 
     let (start_pos, _end_pos) = match content_range {
@@ -158,26 +164,28 @@ pub async fn upload_file(
             Ok(f) => f,
             Err(e) => {
                 error!("File error: {}", e);
-                return HttpResponse::InternalServerError().body(format!("File error: {}", e));
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("File error: {}", e)).into_response();
             }
         };
 
     // 移动文件指针到 start_pos
     if let Err(e) = file.seek(tokio::io::SeekFrom::Start(start_pos-start_offset)).await {
         error!("Failed to seek file: {}", e);
-        return HttpResponse::InternalServerError().body(format!("Failed to seek file: {}", e));
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to seek file: {}", e)).into_response();
     }
 
     let mut hasher = Sha256::new();
     let mut uploaded_size = start_pos;
 
+    let mut payload = body.into_data_stream();
     while let Some(chunk) = payload.next().await {
+        let chunk = chunk.map_err(|e| {
+            error!("Payload error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Payload error: {}", e)).into_response()
+        });
         let chunk = match chunk {
             Ok(c) => c,
-            Err(e) => {
-                error!("Payload error: {}", e);
-                return HttpResponse::InternalServerError().body(format!("Payload error: {}", e));
-            }
+            Err(resp) => return resp,
         };
 
         // 计算剩余需要写入的字节数
@@ -186,7 +194,7 @@ pub async fn upload_file(
 
         if let Err(e) = file.write_all(&chunk[..bytes_to_write]).await {
             error!("Write error: {}", e);
-            return HttpResponse::InternalServerError().body(format!("Write error: {}", e));
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Write error: {}", e)).into_response();
         }
         hasher.update(&chunk[..bytes_to_write]);
         uploaded_size += bytes_to_write as u64;
@@ -196,7 +204,7 @@ pub async fn upload_file(
 
         // 更新上传进度表，仅更新 uploaded_size 和 checksum
         if let Err(e) = update_upload_progress(db_pool, uploaded_size-start_pos, &checksum, &file_id, start_offset).await {
-            return HttpResponse::InternalServerError().body(e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
 
         // 如果已经写入了足够的字节数，退出循环
@@ -211,19 +219,19 @@ pub async fn upload_file(
     // 检查所有分片是否上传完成
     let total_uploaded = match get_total_uploaded(db_pool, &file_id).await {
         Ok(size) => size,
-        Err(e) => return HttpResponse::InternalServerError().body(e),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
     if total_uploaded >= total_size {
         // 更新文件状态为处理中
         if let Err(e) = update_file_status_and_path(db_pool, &file_id, 0, 1, "").await {
-            return HttpResponse::InternalServerError().body(e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
 
         // 组合分片文件为完整文件
         let final_file_path = format!("uploads/{}", safe_filename);
         if let Err(e) = merge_chunks(&safe_filename, total_size).await {
-            return HttpResponse::InternalServerError().body(e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
 
         // Log successful merge
@@ -234,7 +242,7 @@ pub async fn upload_file(
             Ok(f) => f,
             Err(e) => {
                 error!("Failed to open final file for hashing: {}", e);
-                return HttpResponse::InternalServerError().body("Failed to open final file for hashing");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open final file for hashing").into_response();
             }
         };
 
@@ -246,7 +254,7 @@ pub async fn upload_file(
                 Ok(n) => n,
                 Err(e) => {
                     error!("Failed to read final file for hashing: {}", e);
-                    return HttpResponse::InternalServerError().body("Failed to read final file for hashing");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read final file for hashing").into_response();
                 }
             };
             hasher.update(&buffer[..n]);
@@ -256,12 +264,12 @@ pub async fn upload_file(
         // 从数据库中获取预期的哈希值
         let (_, expected_md5, _, _, _) = match fetch_file_record(db_pool, &file_id).await {
             Ok(record) => record,
-            Err(e) => return HttpResponse::InternalServerError().body(e),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         };
 
         // 比较哈希值
         if calculated_md5 != expected_md5 {
-            return HttpResponse::InternalServerError().body("File is corrupted: MD5 hash mismatch");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "File is corrupted: MD5 hash mismatch").into_response();
         }
 
         // Log successful checksum validation
@@ -269,10 +277,10 @@ pub async fn upload_file(
 
         // 更新文件状态为已完成并更新文件路径
         if let Err(e) = update_file_status_and_path(db_pool, &file_id, 1, 2, &final_file_path).await {
-            return HttpResponse::InternalServerError().body(e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
 
-        HttpResponse::Ok().json(ApiResponse::success(
+        (StatusCode::OK, Json(ApiResponse::success(
             "File upload completed successfully",
             json!({
                 "status": "success",
@@ -280,11 +288,11 @@ pub async fn upload_file(
                 "size": total_size,
                 "checksum": calculated_md5
             })
-        ))
+        ))).into_response()
     } else {
         let final_checksum = format!("{:x}", hasher.finalize());
 
-        HttpResponse::Ok().json(ApiResponse::success(
+        (StatusCode::OK, Json(ApiResponse::success(
             "Chunk upload successful",
             json!({
                 "status": "range_success",
@@ -292,7 +300,7 @@ pub async fn upload_file(
                 "size": uploaded_size,
                 "checksum": final_checksum
             })
-        ))
+        ))).into_response()
     }
 }
 
@@ -311,22 +319,22 @@ pub struct ChunkInfo {
 }
 
 pub async fn submit_file_metadata(
-    metadata: web::Json<FileMetadata>,
-    data: web::Data<Arc<AppState>>,
-) -> HttpResponse {
-    let db_pool = data.db_pool.as_ref().unwrap();
+    State(ctx): State<AppContext>,
+    Json(metadata): Json<FileMetadata>,
+) -> impl IntoResponse {
+    let db_pool = &ctx.app_state.db_pool;
     if let Err(_) = check_system_initialized(db_pool).await {
-        return HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(
             "System not initialized",
             "SYSTEM_NOT_INITIALIZED"
-        ));
+        ))).into_response();
     }
 
     let safe_filename = sanitize(&metadata.filename);
     let unique_id = Uuid::new_v4().to_string();
     let file_id = unique_id.clone();
 
-    let mut uploads = data.uploads.lock().await;
+    let mut uploads = ctx.app_state.uploads.lock().await;
     let upload_state = UploadState {
         id: unique_id.clone(),
         filename: safe_filename.clone(),
@@ -339,17 +347,17 @@ pub async fn submit_file_metadata(
         Ok(transaction) => transaction,
         Err(e) => {
             error!("Failed to begin transaction: {}", e);
-            return HttpResponse::InternalServerError().body("Failed to begin transaction");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to begin transaction").into_response();
         }
     };
 
     // Save to database
     if let Err(e) = upload_state.save_to_db(&mut tx, "").await {
         tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
-        return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
             &e,
             "DB_SAVE_ERROR"
-        ));
+        ))).into_response();
     }
 
     // Get chunk size configuration
@@ -357,10 +365,10 @@ pub async fn submit_file_metadata(
         Ok(size) => size,
         Err(e) => {
             tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
-            return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
                 &e,
                 "FETCH_CHUNK_SIZE_ERROR"
-            ));
+            ))).into_response();
         }
     };
 
@@ -375,7 +383,7 @@ pub async fn submit_file_metadata(
 
         if let Err(e) = initialize_upload_progress(&mut tx, &file_id, &safe_filename, chunk_size, start_offset, end_offset).await {
             tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
-            return HttpResponse::InternalServerError().body(e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
 
         chunks.push(ChunkInfo {
@@ -388,16 +396,16 @@ pub async fn submit_file_metadata(
     // Commit the transaction
     if let Err(e) = tx.commit().await {
         error!("Failed to commit transaction: {}", e);
-        return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
             &e.to_string(),
             "COMMIT_TRANSACTION_ERROR"
-        ));
+        ))).into_response();
     }
 
     // Save to in-memory state
     uploads.insert(safe_filename.clone(), upload_state);
 
-    HttpResponse::Ok().json(ApiResponse::success(
+    (StatusCode::OK, Json(ApiResponse::success(
         "Metadata submitted successfully",
         json!({
             "id": file_id,
@@ -407,7 +415,7 @@ pub async fn submit_file_metadata(
             "total_chunks": num_chunks,
             "chunks": chunks
         })
-    ))
+    ))).into_response()
 }
 
 // 新增辅助函数
@@ -462,9 +470,9 @@ pub struct Pagination {
 }
 
 pub async fn get_uploaded_files(
-    data: web::Data<Arc<AppState>>,
-    query: web::Query<Pagination>,
-) -> HttpResponse {
+    State(ctx): State<AppContext>,
+    Query(query): Query<Pagination>,
+) -> impl IntoResponse {
     let page = query.page;
     let page_size = query.page_size;
     let status = query.status;
@@ -472,46 +480,44 @@ pub async fn get_uploaded_files(
     let order = query.order.as_deref().unwrap_or("asc");
 
 
-    let db_pool = data.db_pool.as_ref().unwrap();
+    let db_pool = &ctx.app_state.db_pool;
 
     let total_files = match fetch_total_uploaded_files(db_pool, status).await {
         Ok(total) => total,
-        Err(e) => return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
             &e,
             "FETCH_TOTAL_FILES_ERROR",
-        )),
+        ))).into_response(),
     };
 
     match fetch_uploaded_files(db_pool, page, page_size, status, sort_by, order).await {
-        Ok(files) => HttpResponse::Ok().json(ApiResponse::success(
+        Ok(files) => (StatusCode::OK, Json(ApiResponse::success(
             "Fetched uploaded files successfully",
             json!({
                 "total_files": total_files,
                 "files": files
             }),
-        )),
-        Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+        ))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
             &e,
             "FETCH_FILES_ERROR",
-        )),
+        ))).into_response(),
     }
 }
 
 pub async fn get_upload_status(
-    data: web::Data<Arc<AppState>>,
-    file_id: web::Path<String>,
-) -> HttpResponse {
-    let file_id_str = file_id.into_inner();
-
-    let db_pool = data.db_pool.as_ref().unwrap();
+    State(ctx): State<AppContext>,
+    Path(file_id_str): Path<String>,
+) -> impl IntoResponse {
+    let db_pool = &ctx.app_state.db_pool;
 
     // Fetch file record to get the current status
     let (_filename, _, _, status, _) = match fetch_file_record(db_pool, &file_id_str).await {
         Ok(record) => record,
-        Err(e) => return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
             &e,
             "FETCH_FILE_RECORD_ERROR",
-        )),
+        ))).into_response(),
     };
 
     // If status is 1 (processing) or 2 (completed), return it directly
@@ -522,10 +528,10 @@ pub async fn get_upload_status(
             // Fetch upload progress for each chunk
             let chunk_progress = match fetch_upload_progress(db_pool, &file_id_str).await {
                 Ok(progress) => progress,
-                Err(e) => return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
                     &e,
                     "FETCH_PROGRESS_ERROR",
-                )),
+                ))).into_response(),
             };
 
             // Determine overall status
@@ -554,9 +560,9 @@ pub async fn get_upload_status(
         response_data["chunks"] = json!(chunk_progress);
     }
 
-    HttpResponse::Ok().json(ApiResponse::success(
+    (StatusCode::OK, Json(ApiResponse::success(
         "Fetched upload status successfully",
         response_data,
-    ))
+    ))).into_response()
 }
 

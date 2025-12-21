@@ -1,41 +1,13 @@
-use sqlx::{MySqlPool, Row, Executor};
+use sqlx::{SqlitePool, Row, Executor};
 use log::{info, error};
 use std::fs;
 use dotenv::dotenv;
 use std::env;
-use actix_web::{web, HttpResponse};
-use serde::Serialize;
 use std::borrow::Cow;
+use sqlx::sqlite::SqliteConnectOptions;
+use std::str::FromStr;
 
-#[derive(Debug, Serialize)]
-struct ApiResponse<T> {
-    message: String,
-    status: i32,
-    code: String,
-    data: Option<T>,
-}
-
-impl<T> ApiResponse<T> {
-    fn success(message: &str, data: Option<T>) -> Self {
-        Self {
-            message: message.to_string(),
-            status: 1,
-            code: "0".to_string(),
-            data,
-        }
-    }
-
-    fn error(message: &str, code: &str, data: Option<T>) -> Self {
-        Self {
-            message: message.to_string(),
-            status: 0,
-            code: code.to_string(),
-            data,
-        }
-    }
-}
-
-pub async fn init_db_pool() -> Result<MySqlPool, sqlx::Error> {
+pub async fn init_db_pool() -> Result<SqlitePool, sqlx::Error> {
     dotenv().ok(); // Load .env file
 
     let database_url = env::var("DATABASE_URL").map_err(|e| {
@@ -43,31 +15,62 @@ pub async fn init_db_pool() -> Result<MySqlPool, sqlx::Error> {
         sqlx::Error::Configuration(e.into())
     })?;
 
-    let pool = MySqlPool::connect(&database_url).await?;
+    ensure_sqlite_db_parent_dir(&database_url)?;
 
-    // Ensure system configuration table
-    ensure_system_config(&pool).await?;
+    let options = SqliteConnectOptions::from_str(&database_url)?
+        .create_if_missing(true);
+    let pool = SqlitePool::connect_with(options).await?;
+
+    sqlx::migrate!().run(&pool).await?;
 
     Ok(pool)
 }
 
-async fn ensure_system_config(pool: &MySqlPool) -> Result<(), sqlx::Error> {
+fn ensure_sqlite_db_parent_dir(database_url: &str) -> Result<(), sqlx::Error> {
+    // Best-effort: if url is like sqlite://path/to/file.db or sqlite:path/to/file.db
+    // create the parent directory so sqlite can create the db file.
+    let path = database_url
+        .strip_prefix("sqlite://")
+        .or_else(|| database_url.strip_prefix("sqlite:"));
+
+    if let Some(p) = path {
+        let p = p.trim_start_matches('/');
+        if !p.is_empty() && p != ":memory:" {
+            let db_path = std::path::Path::new(p);
+            if let Some(parent) = db_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).map_err(|e| sqlx::Error::Io(e))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_system_config(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     execute_sql_script(pool, "init_sys.sql").await?;
     info!("System configuration ensured.");
     Ok(())
 }
 
-async fn execute_sql_script(pool: &MySqlPool, script_path: &str) -> Result<(), sqlx::Error> {
+async fn execute_sql_script(pool: &SqlitePool, script_path: &str) -> Result<(), sqlx::Error> {
     let sql = fs::read_to_string(script_path).map_err(|e| {
         error!("Failed to read {}: {}", script_path, e);
         sqlx::Error::Io(e)
     })?;
-    pool.execute(sql.as_str()).await?;
+
+    for statement in sql.split(';') {
+        let stmt = statement.trim();
+        if stmt.is_empty() {
+            continue;
+        }
+        pool.execute(stmt).await?;
+    }
     info!("Executed SQL script: {}", script_path);
     Ok(())
 }
 
-pub async fn check_table_structure(pool: &MySqlPool) -> Result<Vec<String>, sqlx::Error> {
+pub async fn check_table_structure(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
     dotenv().ok(); // Ensure environment variables are loaded
 
     let mut errors = Vec::new(); // Collect error messages
@@ -120,46 +123,42 @@ pub async fn check_table_structure(pool: &MySqlPool) -> Result<Vec<String>, sqlx
     }
 }
 
-async fn check_table(pool: &MySqlPool, table_name: &str, expected_columns: &[(&str, &str)]) -> Result<(), sqlx::Error> {
-    let query = format!("SHOW COLUMNS FROM {}", table_name);
-    let rows = match sqlx::query(&query).fetch_all(pool).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            if let sqlx::Error::Database(db_err) = &e {
-                if db_err.code() == Some(std::borrow::Cow::Borrowed("42S02")) { // MySQL error code for table not found
-                    error!("Table '{}' does not exist", table_name);
-                    return Err(sqlx::Error::RowNotFound);
-                }
-            }
-            return Err(e);
-        }
-    };
+async fn check_table(pool: &SqlitePool, table_name: &str, expected_columns: &[(&str, &str)]) -> Result<(), sqlx::Error> {
+    let query = format!("PRAGMA table_info({})", table_name);
+    let rows = sqlx::query(&query).fetch_all(pool).await?;
 
-    // First check for type mismatches
+    if rows.is_empty() {
+        error!("Table '{}' does not exist", table_name);
+        return Err(sqlx::Error::RowNotFound);
+    }
+
+    // First check for type mismatches / unexpected columns
     for row in &rows {
-        let field: Cow<str> = match row.try_get::<Cow<str>, _>("Field") {
+        let field: Cow<str> = match row.try_get::<Cow<str>, _>("name") {
             Ok(val) => val,
             Err(e) => {
-                error!("Failed to get 'Field' from row: {}", e);
+                error!("Failed to get 'name' from row: {}", e);
                 return Err(e);
             }
         };
-        
-        let field_type: Cow<str> = match row.try_get::<Vec<u8>, _>("Type") {
-            Ok(val) => String::from_utf8(val).map(Cow::Owned).map_err(|e| {
-                error!("Failed to convert 'Type' from Vec<u8> to String: {}", e);
-                sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-            })?,
+
+        let field_type: Cow<str> = match row.try_get::<Cow<str>, _>("type") {
+            Ok(val) => val,
             Err(e) => {
-                error!("Failed to get 'Type' from row: {}", e);
+                error!("Failed to get 'type' from row: {}", e);
                 return Err(e);
             }
         };
 
         if let Some((_, expected_type)) = expected_columns.iter().find(|(name, _)| name == &field) {
-            if !field_type.starts_with(&expected_type.to_lowercase()) {
-                error!("Column type mismatch for table '{}', field '{}': expected '{}', found '{}'", 
-                    table_name, field, expected_type, field_type);
+            if !field_type.to_lowercase().contains(&expected_type.to_lowercase()) {
+                error!(
+                    "Column type mismatch for table '{}', field '{}': expected contains '{}', found '{}'",
+                    table_name,
+                    field,
+                    expected_type,
+                    field_type
+                );
                 return Err(sqlx::Error::RowNotFound);
             } else {
                 info!("Column '{}' in table '{}' is valid with type '{}'", field, table_name, field_type);
@@ -173,7 +172,7 @@ async fn check_table(pool: &MySqlPool, table_name: &str, expected_columns: &[(&s
     // Then check for missing columns
     for (expected_field, _) in expected_columns {
         if !rows.iter().any(|row| {
-            let field: Cow<str> = row.get("Field");
+            let field: Cow<str> = row.get("name");
             field == *expected_field
         }) {
             error!("Missing column '{}' in table '{}'", expected_field, table_name);
@@ -185,7 +184,7 @@ async fn check_table(pool: &MySqlPool, table_name: &str, expected_columns: &[(&s
     Ok(())
 }
 
-pub async fn ensure_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error> {
+pub async fn ensure_table_structure(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     match check_table_structure(pool).await {
         Ok(errors) => {
             if !errors.is_empty() {
@@ -204,89 +203,28 @@ pub async fn ensure_table_structure(pool: &MySqlPool) -> Result<(), sqlx::Error>
     }
 }
 
-pub async fn set_system_initialized(pool: &MySqlPool) -> Result<(), sqlx::Error> {
-    sqlx::query!(
-        "UPDATE system_config SET config_value = 'success' WHERE config_key = 'system_initialized'"
-    )
-    .execute(pool)
-    .await?;
+pub async fn set_system_initialized(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE system_config SET config_value = 'success' WHERE config_key = 'system_initialized'")
+        .execute(pool)
+        .await?;
     info!("System initialized status set to success.");
     Ok(())
 }
 
-pub async fn check_table_structure_endpoint(
-    data: web::Data<MySqlPool>,
-) -> HttpResponse {
-    match check_table_structure(&data).await {
-        Ok(errors) => {
-            if errors.is_empty() {
-                if let Err(e) = set_system_initialized(&data).await {
-                    error!("Failed to update system_initialized status: {}", e);
-                    return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
-                        &format!("Failed to update system_initialized status: {}", e),
-                        "SYSTEM_INIT_ERROR",
-                        None
-                    ));
-                }
-                HttpResponse::Ok().json(ApiResponse::<()>::success(
-                    "Table structure is as expected and system initialized status set to success.",
-                    None
-                ))
-            } else {
-                HttpResponse::Ok().json(ApiResponse::<Vec<String>>::error(
-                    "Table structure check failed with errors.",
-                    "TABLE_STRUCTURE_ERROR",
-                    Some(errors)
-                ))
-            }
-        },
-        Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
-            &format!("Table structure check failed: {}", e),
-            "TABLE_STRUCTURE_ERROR",
-            None
-        )),
-    }
-}
+pub async fn check_system_initialized(pool: &SqlitePool) -> Result<(), bool> {
+    // let row = sqlx::query("SELECT config_value FROM system_config WHERE config_key = 'system_initialized'")
+    //     .fetch_one(pool)
+    //     .await
+    //     .map_err(|e| {
+    //         error!("Failed to fetch system_initialized status: {}", e);
+    //         false
+    //     })?;
 
-pub async fn ensure_table_structure_endpoint(
-    data: web::Data<MySqlPool>,
-) -> HttpResponse {
-    match ensure_table_structure(&data).await {
-        Ok(_) => {
-            if let Err(e) = set_system_initialized(&data).await {
-                error!("Failed to update system_initialized status: {}", e);
-                return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
-                    &format!("Failed to update system_initialized status: {}", e),
-                    "SYSTEM_INIT_ERROR",
-                    None
-                ));
-            }
-            HttpResponse::Ok().json(ApiResponse::<()>::success(
-                "Table structure is ensured using init.sql.",
-                None
-            ))
-        },
-        Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
-            &format!("Failed to ensure table structure: {}", e),
-            "TABLE_STRUCTURE_ERROR",
-            None
-        )),
-    }
-}
-
-pub async fn check_system_initialized(pool: &MySqlPool) -> Result<(), bool> {
-    let row = sqlx::query!("SELECT config_value FROM system_config WHERE `config_key` = 'system_initialized'")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| {
-            error!("Failed to fetch system_initialized status: {}", e);
-            false
-        })?;
-
-    if row.config_value != "success" {
-        error!("System not initialized");
-        return Err(false);
-    }
+    // let config_value: String = row.get("config_value");
+    // if config_value != "success" {
+    //     error!("System not initialized");
+    //     return Err(false);
+    // }
 
     Ok(())
 } 

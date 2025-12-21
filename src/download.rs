@@ -1,22 +1,24 @@
-use actix_web::{web, HttpResponse, Result};
+use axum::{
+    extract::{Path, State},
+    http::{header, StatusCode},
+    response::IntoResponse,
+};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use std::sync::Arc;
 use log::error;
 use crate::upload_dao::fetch_file_record;
-use crate::AppState;
+use crate::AppContext;
 
 pub async fn download_file(
-    data: web::Data<Arc<AppState>>,
-    file_id: web::Path<String>,
-) -> Result<HttpResponse> {
-    let file_id_str = file_id.into_inner();
-    let db_pool = data.db_pool.as_ref().unwrap();
+    State(ctx): State<AppContext>,
+    Path(file_id_str): Path<String>,
+) -> impl IntoResponse {
+    let db_pool = &ctx.app_state.db_pool;
 
     // Fetch file record to get the file path
     let (_, _, _, _, file_path) = match fetch_file_record(db_pool, &file_id_str).await {
         Ok(record) => record,
-        Err(e) => return Ok(HttpResponse::InternalServerError().body(e)),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
     // Open the file
@@ -24,7 +26,7 @@ pub async fn download_file(
         Ok(f) => f,
         Err(e) => {
             error!("Failed to open file: {}", e);
-            return Ok(HttpResponse::InternalServerError().body("Failed to open file"));
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open file").into_response();
         }
     };
 
@@ -32,11 +34,14 @@ pub async fn download_file(
     let mut buffer = Vec::new();
     if let Err(e) = file.read_to_end(&mut buffer).await {
         error!("Failed to read file: {}", e);
-        return Ok(HttpResponse::InternalServerError().body("Failed to read file"));
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response();
     }
 
     // Return the file content as a response
-    Ok(HttpResponse::Ok()
-        .content_type("application/octet-stream")
-        .body(buffer))
-} 
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        buffer,
+    )
+        .into_response()
+}
