@@ -111,12 +111,12 @@ async fn main() -> std::io::Result<()> {
         .route("/api/upload_status/:file_id", get(get_upload_status))
         .route("/api/download/:file_id", get(download_file))
         .route("/api/uploaded_files", get(get_uploaded_files))
-        .route("/dlna/devices", get(discovered_devices))
-        .route("/dlna/play", post(play_video))
-        .route("/dlna/pause", post(pause_video))
-        .route("/dlna/resume", post(resume_video))
-        .route("/dlna/stop", post(stop_video))
-        .route("/dlna/browse", post(browse_files))
+        .route("/api/dlna/devices", get(discovered_devices))
+        .route("/api/dlna/play", post(play_video))
+        .route("/api/dlna/pause", post(pause_video))
+        .route("/api/dlna/resume", post(resume_video))
+        .route("/api/dlna/stop", post(stop_video))
+        .route("/api/dlna/browse", post(browse_files))
         .route("/hello", get(hello))
         .with_state(ctx.clone());
 

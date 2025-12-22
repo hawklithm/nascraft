@@ -1,7 +1,5 @@
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 use log::{info, error, debug};
-use local_ip_address::local_ip;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -9,11 +7,6 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use rupnp::ssdp::SearchTarget;
-use rupnp::{Device, Service};
-use std::str::FromStr;
-use rupnp::ssdp::URN;
-use futures::StreamExt;
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use reqwest;
