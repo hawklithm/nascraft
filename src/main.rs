@@ -20,7 +20,8 @@ use display_remote::{
     DLNAPlayer, discovered_devices,
     play_video, pause_video, resume_video, stop_video, hello, browse_files
 };
-use tower_http::services::ServeDir;
+use mdns_sd::{ServiceDaemon, ServiceInfo};
+use local_ip_address::local_ip;
 
 #[derive(Clone)]
 pub struct AppContext {
@@ -101,8 +102,52 @@ async fn main() -> std::io::Result<()> {
         dlna_player: dlna_player.clone(),
     };
 
-    info!("Starting server at http://127.0.0.1:8080");
-    println!("Starting server at http://127.0.0.1:8080");
+    let server_port: u16 = env::var("NASCRAFT_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(8080);
+
+    let mdns_service_type = env::var("NASCRAFT_MDNS_SERVICE_TYPE")
+        .unwrap_or_else(|_| "_nascraft._tcp.local.".to_string());
+    let mdns_instance_name = env::var("NASCRAFT_MDNS_INSTANCE")
+        .unwrap_or_else(|_| "nascraft".to_string());
+
+    let mdns = ServiceDaemon::new().map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create mDNS daemon: {e}"))
+    })?;
+
+    let ip = local_ip().unwrap_or_else(|e| {
+        error!("Failed to get local IP: {}", e);
+        "127.0.0.1".parse().expect("127.0.0.1 should be valid")
+    });
+    let host_name = format!("{}.local.", mdns_instance_name);
+    let mut mdns_properties: HashMap<String, String> = HashMap::new();
+    mdns_properties.insert("proto".to_string(), "http".to_string());
+    mdns_properties.insert("port".to_string(), server_port.to_string());
+    let service_info = ServiceInfo::new(
+        &mdns_service_type,
+        &mdns_instance_name,
+        &host_name,
+        ip,
+        server_port,
+        mdns_properties,
+    )
+    .map(|s| s.enable_addr_auto())
+    .map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create mDNS service info: {e}"))
+    })?;
+
+    mdns.register(service_info).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to register mDNS service: {e}"))
+    })?;
+
+    info!(
+        "mDNS service registered: type={}, instance={}, ip={}, port={}",
+        mdns_service_type, mdns_instance_name, ip, server_port
+    );
+
+    info!("Starting server at http://0.0.0.0:{}", server_port);
+    println!("Starting server at http://0.0.0.0:{}", server_port);
 
     // Main API server
     let app = Router::new()
@@ -117,14 +162,15 @@ async fn main() -> std::io::Result<()> {
         .route("/api/dlna/resume", post(resume_video))
         .route("/api/dlna/stop", post(stop_video))
         .route("/api/dlna/browse", post(browse_files))
-        .route("/hello", get(hello))
+        .route("/api/hello", get(hello))
         .with_state(ctx.clone());
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
+    let bind_addr = format!("0.0.0.0:{}", server_port);
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
 
-    // Media static server (for DLNA)
-    let media_app = Router::new().nest_service("/", ServeDir::new("./media"));
-    let media_listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await?;
+    // // Media static server (for DLNA)
+    // let media_app = Router::new().nest_service("/", ServeDir::new("./media"));
+    // let media_listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await?;
 
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -132,12 +178,15 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(media_listener, media_app).await {
-            error!("Media server error: {}", e);
-        }
-    });
+    // tokio::spawn(async move {
+    //     if let Err(e) = axum::serve(media_listener, media_app).await {
+    //         error!("Media server error: {}", e);
+    //     }
+    // });
 
     tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
+    if let Err(e) = mdns.shutdown() {
+        error!("mDNS shutdown failed: {}", e);
+    }
     Ok(())
 }
