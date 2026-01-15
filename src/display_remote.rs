@@ -304,7 +304,7 @@ pub struct DeviceResponse {
 }
 
 pub async fn discovered_devices(
-    State(ctx): State<crate::AppContext>,
+    State(ctx): State<crate::context::AppContext>,
 ) -> impl IntoResponse {
     info!("Handling device discovery request");
     let player = ctx.dlna_player.lock().await;
@@ -341,7 +341,7 @@ pub struct DeviceControlRequest {
 }
 
 pub async fn play_video(
-    State(ctx): State<crate::AppContext>,
+    State(ctx): State<crate::context::AppContext>,
     Json(req): Json<PlayVideoRequest>,
 ) -> impl IntoResponse {
     info!("Handling play video request - Device ID: {}, Media ID: {}", 
@@ -364,7 +364,7 @@ pub async fn play_video(
 }
 
 pub async fn pause_video(
-    State(ctx): State<crate::AppContext>,
+    State(ctx): State<crate::context::AppContext>,
     Json(req): Json<DeviceControlRequest>,
 ) -> impl IntoResponse {
     info!("Handling pause video request - Device ID: {}", req.device_id);
@@ -386,7 +386,7 @@ pub async fn pause_video(
 }
 
 pub async fn resume_video(
-    State(ctx): State<crate::AppContext>,
+    State(ctx): State<crate::context::AppContext>,
     Json(req): Json<DeviceControlRequest>,
 ) -> impl IntoResponse {
     info!("Handling resume video request - Device ID: {}", req.device_id);
@@ -408,7 +408,7 @@ pub async fn resume_video(
 }
 
 pub async fn stop_video(
-    State(ctx): State<crate::AppContext>,
+    State(ctx): State<crate::context::AppContext>,
     Json(req): Json<DeviceControlRequest>,
 ) -> impl IntoResponse {
     info!("Handling stop video request - Device ID: {}", req.device_id);
@@ -504,7 +504,7 @@ pub struct BrowseRequest {
 }
 
 pub async fn browse_files(
-    State(ctx): State<crate::AppContext>,
+    State(ctx): State<crate::context::AppContext>,
     Json(req): Json<BrowseRequest>,
 ) -> impl IntoResponse {
     info!("Handling browse request - ID: {}", req.id);

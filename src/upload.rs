@@ -21,7 +21,7 @@ use crate::init_env::check_system_initialized;
 use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress};
 use chrono::Utc;
 use md5::Md5;
-use crate::AppContext;
+use crate::context::AppContext;
 
 #[derive(Debug)]
 pub struct AppState {
