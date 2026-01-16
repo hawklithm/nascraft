@@ -1,4 +1,5 @@
 use std::env;
+use log::info;
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -25,6 +26,11 @@ impl AppConfig {
             .ok()
             .and_then(|v| v.parse::<u16>().ok())
             .unwrap_or(53530);
+
+        info!(
+            "Loaded config: server_port={}, mdns_service_type={}, mdns_instance_name={}, udp_discovery_port={}",
+            server_port, mdns_service_type, mdns_instance_name, udp_discovery_port
+        );
 
         Self {
             server_port,

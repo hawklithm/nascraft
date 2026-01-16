@@ -10,6 +10,10 @@ pub fn start_mdns_advertise(cfg: &AppConfig) -> std::io::Result<ServiceDaemon> {
     })?;
 
     let host_name = format!("{}.local.", cfg.mdns_instance_name);
+    info!(
+        "mDNS advertise init: service_type={}, instance_name={}, hostname={}",
+        cfg.mdns_service_type, cfg.mdns_instance_name, host_name
+    );
     let mut mdns_properties: HashMap<String, String> = HashMap::new();
     mdns_properties.insert("proto".to_string(), "http".to_string());
     mdns_properties.insert("port".to_string(), cfg.server_port.to_string());
@@ -18,6 +22,8 @@ pub fn start_mdns_advertise(cfg: &AppConfig) -> std::io::Result<ServiceDaemon> {
         error!("Failed to get local IP: {}", e);
         "127.0.0.1".parse().expect("127.0.0.1 should be valid")
     });
+
+    info!("mDNS advertise address: ip={}, port={}", ip, cfg.server_port);
 
     let service_info = ServiceInfo::new(
         &cfg.mdns_service_type,
@@ -43,8 +49,8 @@ pub fn start_mdns_advertise(cfg: &AppConfig) -> std::io::Result<ServiceDaemon> {
     })?;
 
     info!(
-        "mDNS service registered: type={}, instance={}, port={}",
-        cfg.mdns_service_type, cfg.mdns_instance_name, cfg.server_port
+        "mDNS service registered: type={}, instance={}, hostname={}, ip={}, port={}",
+        cfg.mdns_service_type, cfg.mdns_instance_name, host_name, ip, cfg.server_port
     );
 
     Ok(mdns)

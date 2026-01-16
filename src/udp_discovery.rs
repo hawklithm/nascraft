@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use log::{error, info, warn};
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 
@@ -38,7 +38,7 @@ pub async fn run_udp_discovery_responder(cfg: AppConfig) {
         let (n, peer) = match sock.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
-                warn!("UDP discovery recv failed: {}", e);
+                info!("UDP discovery recv failed: {}", e);
                 continue;
             }
         };
@@ -46,12 +46,21 @@ pub async fn run_udp_discovery_responder(cfg: AppConfig) {
         let probe: Result<UdpDiscoveryProbe, _> = serde_json::from_slice(&buf[..n]);
         let probe = match probe {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(e) => {
+                info!("UDP discovery: ignoring invalid JSON from {}: {}", peer, e);
+                continue;
+            }
         };
 
         if probe.t != "nascraft_discover" || probe.v != 1 {
+            info!(
+                "UDP discovery: ignoring unexpected probe from {}: t={}, v={}",
+                peer, probe.t, probe.v
+            );
             continue;
         }
+
+        info!("UDP discovery probe received: peer={}", peer);
 
         let resp = UdpDiscoveryResponse {
             t: "nascraft_here".to_string(),
@@ -64,13 +73,20 @@ pub async fn run_udp_discovery_responder(cfg: AppConfig) {
         let payload = match serde_json::to_vec(&resp) {
             Ok(v) => v,
             Err(e) => {
-                warn!("UDP discovery encode response failed: {}", e);
+                info!("UDP discovery encode response failed: {}", e);
                 continue;
             }
         };
 
         if let Err(e) = sock.send_to(&payload, peer).await {
-            warn!("UDP discovery send failed: peer={}, err={}", peer, e);
+            info!("UDP discovery send failed: peer={}, err={}", peer, e);
+        } else {
+            info!(
+                "UDP discovery response sent: peer={}, server_port={}, bytes={}",
+                peer,
+                cfg.server_port,
+                payload.len()
+            );
         }
     }
 }

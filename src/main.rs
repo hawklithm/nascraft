@@ -21,6 +21,7 @@ use crate::router::build_router;
 use crate::server::serve_http;
 use crate::udp_discovery::run_udp_discovery_responder;
 use crate::upload::AppState;
+use tracing::info;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
@@ -30,6 +31,8 @@ use tokio::sync::Mutex;
 async fn main() -> std::io::Result<()> {
     init_logging()?;
     ensure_data_dirs()?;
+
+    info!("Nascraft starting up");
 
     // DATABASE_URL is required
     if env::var("DATABASE_URL").is_err() {
@@ -56,16 +59,24 @@ async fn main() -> std::io::Result<()> {
 
     let cfg = AppConfig::from_env();
 
+    info!("Starting mDNS advertisement");
+
     let mdns = start_mdns_advertise(&cfg)?;
+
+    info!("Starting UDP discovery responder");
 
     tokio::spawn(run_udp_discovery_responder(cfg.clone()));
 
     println!("Starting server at http://0.0.0.0:{}", cfg.server_port);
 
+    info!("Starting HTTP server on 0.0.0.0:{}", cfg.server_port);
+
     let app = build_router(ctx.clone());
     serve_http(app, cfg.server_port).await?;
 
     tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
+    info!("Shutdown signal received (ctrl-c)");
     shutdown_mdns(mdns);
+    info!("Shutdown complete");
     Ok(())
 }

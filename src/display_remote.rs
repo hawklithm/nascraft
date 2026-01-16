@@ -1,5 +1,5 @@
 use std::time::Duration;
-use log::{info, error, debug};
+use log::{info, error};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -136,7 +136,7 @@ impl SSEListener {
         while let Ok(Some(chunk)) = response.chunk().await {
             let text = String::from_utf8_lossy(&chunk);
             for line in text.lines() {
-                debug!("origin message: {}", line);
+                info!("origin message: {}", line);
                 if line.is_empty() {
                     if !event_data.is_empty() {
                         self.handle_event(&event_type, &event_data).await?;
@@ -157,7 +157,7 @@ impl SSEListener {
     async fn handle_event(&self, event_type: &str, data: &str) -> Result<(), String> {
         match event_type {
             "message" => {
-                debug!("Parsing message data: {}", data);
+                info!("Parsing message data: {}", data);
                 match serde_json::from_str::<DeviceMessage>(data) {
                     Ok(msg) => {
                         match msg.action.as_str() {
@@ -168,7 +168,7 @@ impl SSEListener {
                                 let _ = self.tx.send(msg);
                             }
                             _ => {
-                                debug!("忽略未知的渲染器动作: {}", msg.action);
+                                info!("忽略未知的渲染器动作: {}", msg.action);
                             }
                         }
                     }
@@ -178,7 +178,7 @@ impl SSEListener {
                 }
             }
             _ => {
-                debug!("忽略未知的事件类型: {}", event_type);
+                info!("忽略未知的事件类型: {}", event_type);
             }
         }
         Ok(())
@@ -223,7 +223,7 @@ impl DLNAPlayer {
 
         let request_url = format!("http://localhost:{}/v1/api/renderers/control", self.media_server_port);
         info!("Sending request to: {}", request_url);
-        debug!("Request payload: {}", serde_json::to_string_pretty(&control_request).unwrap());
+        info!("Request payload: {}", serde_json::to_string_pretty(&control_request).unwrap());
 
         let response = client.post(&request_url)
             .json(&control_request)
@@ -261,7 +261,7 @@ impl DLNAPlayer {
 
         let request_url = format!("{}/v1/api/player/browse", base_url);
         info!("Sending browse request to: {}", request_url);
-        debug!("Request payload: {}", serde_json::to_string_pretty(&request_body).unwrap());
+        info!("Request payload: {}", serde_json::to_string_pretty(&request_body).unwrap());
 
         let response = client.post(&request_url)
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
@@ -313,7 +313,7 @@ pub async fn discovered_devices(
     info!("Converting device messages to response format");
     let device_responses: Vec<DeviceResponse> = devices.values()
         .map(|msg| {
-            debug!("Processing device - ID: {}, Name: {}", msg.id, msg.name);
+            info!("Processing device - ID: {}, Name: {}", msg.id, msg.name);
             DeviceResponse {
                 id: msg.id,
                 name: msg.name.clone(),

@@ -13,6 +13,10 @@ sha2 = "0.10"
 tokio = { version = "1.0", features = ["full"] }
 sanitize-filename = "0.6"
 log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+tracing-log = "0.2"
 uuid = { version = "1.0", features = ["v4"] }
 sqlx = { version = "0.8", features = ["chrono","sqlite", "time","runtime-tokio-native-tls","bigdecimal","macros"] }
 dotenv = "0.15"
