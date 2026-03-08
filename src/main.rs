@@ -11,6 +11,8 @@ mod router;
 mod server;
 mod mdns_advertise;
 mod udp_discovery;
+mod ssdp;
+mod file_checker;
 
 use crate::config::AppConfig;
 use crate::context::AppContext;
@@ -19,7 +21,9 @@ use crate::logging::{ensure_data_dirs, init_logging};
 use crate::mdns_advertise::{shutdown_mdns, start_mdns_advertise};
 use crate::router::build_router;
 use crate::server::serve_http;
-use crate::udp_discovery::run_udp_discovery_responder;
+use crate::udp_discovery::{run_udp_discovery_responder, run_udp_broadcast_announcer};
+use crate::ssdp::{run_ssdp_responder, run_ssdp_announcer};
+use crate::file_checker::start_file_integrity_checker;
 use crate::upload::AppState;
 use tracing::info;
 use std::collections::HashMap;
@@ -63,9 +67,19 @@ async fn main() -> std::io::Result<()> {
 
     let mdns = start_mdns_advertise(&cfg)?;
 
-    info!("Starting UDP discovery responder");
+    info!("Starting UDP discovery responder and broadcaster");
 
     tokio::spawn(run_udp_discovery_responder(cfg.clone()));
+    tokio::spawn(run_udp_broadcast_announcer(cfg.clone()));
+
+    info!("Starting SSDP (UPnP) discovery responder and announcer");
+
+    tokio::spawn(run_ssdp_responder(cfg.clone()));
+    tokio::spawn(run_ssdp_announcer(cfg.clone()));
+
+    info!("Starting file integrity checker (10-minute interval)");
+
+    start_file_integrity_checker(app_state.db_pool.clone());
 
     println!("Starting server at http://0.0.0.0:{}", cfg.server_port);
 

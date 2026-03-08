@@ -18,7 +18,7 @@ use sanitize_filename::sanitize;
 use uuid::Uuid;
 use sqlx::{SqlitePool, Transaction, Sqlite};
 use crate::init_env::check_system_initialized;
-use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress};
+use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress, fetch_file_by_checksum, update_file_meta_info};
 use chrono::Utc;
 use md5::Md5;
 use crate::context::AppContext;
@@ -275,6 +275,34 @@ pub async fn upload_file(
         // Log successful checksum validation
         info!("Checksum validated successfully for file ID: {}", file_id);
 
+        // 获取文件元信息
+        let file_metadata = match fs::metadata(&final_file_path).await {
+            Ok(meta) => meta,
+            Err(e) => {
+                error!("Failed to get file metadata: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get file metadata: {}", e)).into_response();
+            }
+        };
+
+        let file_mtime = file_metadata.modified()
+            .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
+            .unwrap_or(0);
+        let file_ctime = file_metadata.created()
+            .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
+            .unwrap_or(file_mtime);
+
+        // 获取inode（仅Unix-like系统）
+        let file_ino = std::fs::metadata(&final_file_path)
+            .ok()
+            .and_then(|m| std::os::unix::fs::MetadataExt::ino(&m).try_into().ok())
+            .unwrap_or(0);
+
+        // 更新文件元信息
+        if let Err(e) = update_file_meta_info(db_pool, &file_id, file_mtime, file_ctime, file_ino).await {
+            error!("Failed to update file meta info: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+        }
+
         // 更新文件状态为已完成并更新文件路径
         if let Err(e) = update_file_status_and_path(db_pool, &file_id, 1, 2, &final_file_path).await {
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
@@ -331,6 +359,37 @@ pub async fn submit_file_metadata(
     }
 
     let safe_filename = sanitize(&metadata.filename);
+
+    // 检查文件是否已存在（基于 checksum 去重）
+    match fetch_file_by_checksum(db_pool, &metadata.checksum).await {
+        Ok(Some((existing_file_id, existing_filename, existing_file_path))) => {
+            info!("File with checksum {} already exists (file_id: {}), skipping upload", metadata.checksum, existing_file_id);
+            return (StatusCode::OK, Json(ApiResponse::success(
+                "File already exists, upload skipped",
+                json!({
+                    "status": "duplicate",
+                    "message": "File with same checksum already exists on server",
+                    "id": existing_file_id,
+                    "filename": existing_filename,
+                    "file_path": existing_file_path,
+                    "total_size": metadata.total_size,
+                    "checksum": metadata.checksum,
+                    "skipped": true
+                })
+            ))).into_response();
+        }
+        Ok(None) => {
+            info!("File with checksum {} not found, proceeding with upload", metadata.checksum);
+        }
+        Err(e) => {
+            error!("Failed to check file by checksum: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
+                &e,
+                "CHECKSUM_CHECK_ERROR"
+            ))).into_response();
+        }
+    }
+
     let unique_id = Uuid::new_v4().to_string();
     let file_id = unique_id.clone();
 

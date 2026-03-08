@@ -134,7 +134,7 @@ pub async fn save_upload_state_to_db(
     file_path: &str,
 ) -> Result<(), String> {
     if let Err(e) = sqlx::query(
-        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum, file_path) VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum, file_path, file_mtime, file_ctime, file_ino) VALUES (?, ?, ?, ?, ?, 0, 0, 0)"
     )
     .bind(file_id)
     .bind(filename)
@@ -150,6 +150,29 @@ pub async fn save_upload_state_to_db(
     info!("Successfully saved upload state for file '{}', ID: '{}'", filename, file_id);
 
     Ok(())
+}
+
+/// 更新文件元信息（文件系统元信息）
+pub async fn update_file_meta_info(
+    db_pool: &SqlitePool,
+    file_id: &str,
+    file_mtime: i64,
+    file_ctime: i64,
+    file_ino: i64,
+) -> Result<(), String> {
+    match sqlx::query(
+        "UPDATE upload_file_meta SET file_mtime = ?, file_ctime = ?, file_ino = ?, last_updated = strftime('%s', 'now') WHERE file_id = ?"
+    )
+    .bind(file_mtime)
+    .bind(file_ctime)
+    .bind(file_ino)
+    .bind(file_id)
+    .execute(db_pool)
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Failed to update file meta info: {}", e)),
+    }
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -244,6 +267,24 @@ pub async fn fetch_upload_progress(db_pool: &SqlitePool, file_id: &str) -> Resul
         Err(e) => {
             error!("Failed to fetch upload progress: {}", e);
             Err("Failed to fetch upload progress".to_string())
+        }
+    }
+}
+
+/// 根据文件 MD5 checksum 查找已存在的文件记录
+/// 返回 Option<(file_id, filename, file_path)>
+pub async fn fetch_file_by_checksum(db_pool: &SqlitePool, checksum: &str) -> Result<Option<(String, String, String)>, String> {
+    match sqlx::query_as::<_, (String, String, String)>(
+        "SELECT file_id, filename, file_path FROM upload_file_meta WHERE checksum = ? AND status = 2"
+    )
+    .bind(checksum)
+    .fetch_optional(db_pool)
+    .await
+    {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            error!("Failed to fetch file by checksum: {}", e);
+            Err("Failed to fetch file by checksum".to_string())
         }
     }
 }
