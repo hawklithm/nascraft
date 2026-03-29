@@ -188,19 +188,26 @@ impl SSEListener {
 pub struct DLNAPlayer {
     media_server_port: u16,
     sse_listener: Arc<SSEListener>,
+    enabled: bool,
 }
 
 impl DLNAPlayer {
-    pub async fn new() -> Self {
+    pub async fn new(enabled: bool) -> Self {
         info!("Initializing DLNA player");
         let media_server_port = 9001;
         let sse_listener = Arc::new(SSEListener::new(media_server_port));
-        sse_listener.clone().start_listening().await;
-        
-        info!("DLNA player initialized with media server port: {}", media_server_port);
+        if enabled {
+            info!("DLNA remote enabled, starting SSE listener");
+            sse_listener.clone().start_listening().await;
+        } else {
+            info!("DLNA remote disabled, skipping SSE listener startup");
+        }
+
+        info!("DLNA player initialized with media server port: {}, enabled: {}", media_server_port, enabled);
         DLNAPlayer {
             media_server_port,
             sse_listener,
+            enabled,
         }
     }
 

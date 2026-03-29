@@ -211,7 +211,7 @@ pub async fn set_system_initialized(pool: &SqlitePool) -> Result<(), sqlx::Error
     Ok(())
 }
 
-pub async fn check_system_initialized(pool: &SqlitePool) -> Result<(), bool> {
+pub async fn check_system_initialized(_pool: &SqlitePool) -> Result<(), bool> {
     // let row = sqlx::query("SELECT config_value FROM system_config WHERE config_key = 'system_initialized'")
     //     .fetch_one(pool)
     //     .await

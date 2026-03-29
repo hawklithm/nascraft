@@ -54,15 +54,15 @@ async fn main() -> std::io::Result<()> {
         db_pool,
     });
 
+    let cfg = AppConfig::from_env();
+
     // 创建DLNA播放器实例
-    let dlna_player = Arc::new(Mutex::new(crate::display_remote::DLNAPlayer::new().await));
+    let dlna_player = Arc::new(Mutex::new(crate::display_remote::DLNAPlayer::new(cfg.enable_dlna_remote).await));
 
     let ctx = AppContext {
         app_state: app_state.clone(),
         dlna_player: dlna_player.clone(),
     };
-
-    let cfg = AppConfig::from_env();
 
     info!("Starting mDNS advertisement");
 

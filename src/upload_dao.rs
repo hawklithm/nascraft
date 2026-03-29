@@ -16,6 +16,8 @@ pub async fn fetch_file_record(db_pool: &SqlitePool, file_id: &str) -> Result<(S
             let total_size: i64 = row.get("total_size");
             let status: Option<i32> = row.try_get("status").ok();
             let file_path: String = row.get("file_path");
+            // We don't need thumbnail_path for this result type, just ignore it
+            let _: Option<String> = row.try_get("thumbnail_path").ok();
             Ok((filename, checksum, total_size, status.unwrap_or(0), file_path))
         }
         Err(e) => {

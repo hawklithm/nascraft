@@ -5,7 +5,7 @@ use tokio::io::AsyncReadExt;
 use md5::{Md5, Digest};
 use std::time::Duration;
 use crate::upload_dao::update_file_meta_info;
-use crate::thumbnail::{is_image_file, generate_thumbnail, ThumbnailConfig, thumbnail_exists};
+use crate::thumbnail::{is_image_file, generate_thumbnail, ThumbnailConfig};
 use crate::upload_dao::update_file_thumbnail_path;
 
 /// 定期检查文件元信息是否发生变化
