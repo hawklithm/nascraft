@@ -187,6 +187,7 @@ pub struct UploadedFile {
     pub file_path: String,
     pub thumbnail_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
     pub thumbnail_url: Option<String>,
     pub last_updated: i64,
 }
