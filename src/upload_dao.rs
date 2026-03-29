@@ -5,7 +5,7 @@ use sqlx::FromRow;
 use chrono;
 
 pub async fn fetch_file_record(db_pool: &SqlitePool, file_id: &str) -> Result<(String, String, i64, i32, String), String> {
-    match sqlx::query("SELECT filename, checksum, total_size, status, file_path FROM upload_file_meta WHERE file_id = ?")
+    match sqlx::query("SELECT filename, checksum, total_size, status, file_path, thumbnail_path FROM upload_file_meta WHERE file_id = ?")
         .bind(file_id)
         .fetch_one(db_pool)
         .await
@@ -183,6 +183,9 @@ pub struct UploadedFile {
     pub checksum: String,
     pub status: i32,
     pub file_path: String,
+    pub thumbnail_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
     pub last_updated: i64,
 }
 
@@ -196,7 +199,7 @@ pub async fn fetch_uploaded_files(
 ) -> Result<Vec<UploadedFile>, String> {
     let offset = (page - 1) * page_size;
     let mut query = format!(
-        "SELECT file_id, filename, total_size, checksum, status, file_path, last_updated FROM upload_file_meta WHERE 1=1"
+        "SELECT file_id, filename, total_size, checksum, status, file_path, thumbnail_path, last_updated FROM upload_file_meta WHERE 1=1"
     );
 
     if let Some(status) = status {
@@ -286,5 +289,41 @@ pub async fn fetch_file_by_checksum(db_pool: &SqlitePool, checksum: &str) -> Res
             error!("Failed to fetch file by checksum: {}", e);
             Err("Failed to fetch file by checksum".to_string())
         }
+    }
+}
+
+/// Fetch a complete UploadedFile by file_id
+pub async fn fetch_uploaded_file_by_id(db_pool: &SqlitePool, file_id: &str) -> Result<Option<UploadedFile>, String> {
+    match sqlx::query_as::<_, UploadedFile>(
+        "SELECT file_id, filename, total_size, checksum, status, file_path, thumbnail_path, last_updated FROM upload_file_meta WHERE file_id = ?"
+    )
+    .bind(file_id)
+    .fetch_optional(db_pool)
+    .await
+    {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            error!("Failed to fetch uploaded file by id: {}", e);
+            Err("Failed to fetch uploaded file".to_string())
+        }
+    }
+}
+
+/// 更新文件的缩略图路径
+pub async fn update_file_thumbnail_path(
+    db_pool: &SqlitePool,
+    file_id: &str,
+    thumbnail_path: &str,
+) -> Result<(), String> {
+    match sqlx::query(
+        "UPDATE upload_file_meta SET thumbnail_path = ?, last_updated = strftime('%s', 'now') WHERE file_id = ?"
+    )
+    .bind(thumbnail_path)
+    .bind(file_id)
+    .execute(db_pool)
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Failed to update file thumbnail path: {}", e)),
     }
 }

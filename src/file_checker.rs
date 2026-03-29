@@ -5,6 +5,8 @@ use tokio::io::AsyncReadExt;
 use md5::{Md5, Digest};
 use std::time::Duration;
 use crate::upload_dao::update_file_meta_info;
+use crate::thumbnail::{is_image_file, generate_thumbnail, ThumbnailConfig, thumbnail_exists};
+use crate::upload_dao::update_file_thumbnail_path;
 
 /// 定期检查文件元信息是否发生变化
 /// 每隔10分钟检查一次uploads目录下的所有文件
@@ -37,7 +39,7 @@ struct FileSystemMeta {
 async fn check_and_update_file_integrity(db_pool: &SqlitePool) -> Result<(), String> {
     // 获取所有已完成状态(status=2)且文件路径不为空的文件记录
     let files = match sqlx::query(
-        "SELECT file_id, filename, checksum, file_path, total_size, file_mtime, file_ctime, file_ino FROM upload_file_meta WHERE status = 2 AND file_path IS NOT NULL AND file_path != ''"
+        "SELECT file_id, filename, checksum, file_path, total_size, file_mtime, file_ctime, file_ino, thumbnail_path FROM upload_file_meta WHERE status = 2 AND file_path IS NOT NULL AND file_path != ''"
     )
     .fetch_all(db_pool)
     .await
@@ -53,7 +55,9 @@ async fn check_and_update_file_integrity(db_pool: &SqlitePool) -> Result<(), Str
     let mut checksum_updated_count = 0;
     let mut missing_count = 0;
     let mut unchanged_count = 0;
+    let mut thumbnails_generated_count = 0;
     let files_count = files.len();
+    let thumbnail_config = ThumbnailConfig::default();
 
     for row in &files {
         let file_id: String = row.get("file_id");
@@ -64,6 +68,7 @@ async fn check_and_update_file_integrity(db_pool: &SqlitePool) -> Result<(), Str
         let stored_mtime: i64 = row.get("file_mtime");
         let stored_ctime: i64 = row.get("file_ctime");
         let stored_ino: i64 = row.get("file_ino");
+        let stored_thumbnail_path: Option<String> = row.try_get("thumbnail_path").ok();
 
         // 检查文件是否存在
         if !fs::try_exists(&file_path).await.unwrap_or(false) {
@@ -168,15 +173,29 @@ async fn check_and_update_file_integrity(db_pool: &SqlitePool) -> Result<(), Str
                 meta_updated_count += 1;
             }
         }
+
+        // Generate thumbnail if image file and no thumbnail exists
+        if is_image_file(&filename) && stored_thumbnail_path.is_none() {
+            info!("Generating thumbnail for existing image: {} (file_id: {})", filename, file_id);
+            if let Some(thumbnail_path) = generate_thumbnail(&thumbnail_config, &file_path, &stored_checksum).await {
+                if let Err(e) = update_file_thumbnail_path(db_pool, &file_id, &thumbnail_path).await {
+                    error!("Failed to save thumbnail path for existing image: {}", e);
+                } else {
+                    info!("Thumbnail generated for existing image: {} (file_id: {})", filename, file_id);
+                    thumbnails_generated_count += 1;
+                }
+            }
+        }
     }
 
     info!(
-        "File integrity check completed: {} total, {} unchanged, {} meta-updated, {} checksum-updated, {} missing",
+        "File integrity check completed: {} total, {} unchanged, {} meta-updated, {} checksum-updated, {} missing, {} thumbnails generated",
         files_count,
         unchanged_count,
         meta_updated_count,
         checksum_updated_count,
-        missing_count
+        missing_count,
+        thumbnails_generated_count
     );
 
     Ok(())

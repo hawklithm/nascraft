@@ -22,6 +22,8 @@ use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_upl
 use chrono::Utc;
 use md5::Md5;
 use crate::context::AppContext;
+use crate::thumbnail::{is_image_file, generate_thumbnail, ThumbnailConfig};
+use crate::upload_dao::update_file_thumbnail_path;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -308,6 +310,17 @@ pub async fn upload_file(
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
 
+        // Generate thumbnail if this is an image file
+        if is_image_file(&safe_filename) {
+            let config = ThumbnailConfig::default();
+            if let Some(thumbnail_path) = generate_thumbnail(&config, &final_file_path, &calculated_md5).await {
+                if let Err(e) = update_file_thumbnail_path(db_pool, &file_id, &thumbnail_path).await {
+                    error!("Failed to save thumbnail path to database: {}", e);
+                    // Don't fail the upload if thumbnail generation fails
+                }
+            }
+        }
+
         (StatusCode::OK, Json(ApiResponse::success(
             "File upload completed successfully",
             json!({
@@ -550,13 +563,22 @@ pub async fn get_uploaded_files(
     };
 
     match fetch_uploaded_files(db_pool, page, page_size, status, sort_by, order).await {
-        Ok(files) => (StatusCode::OK, Json(ApiResponse::success(
-            "Fetched uploaded files successfully",
-            json!({
-                "total_files": total_files,
-                "files": files
-            }),
-        ))).into_response(),
+        Ok(mut files) => {
+            // Add thumbnail_url for files that have a thumbnail
+            for file in &mut files {
+                if file.thumbnail_path.is_some() {
+                    file.thumbnail_url = Some(format!("/api/thumbnail/{}", file.file_id));
+                }
+            }
+
+            (StatusCode::OK, Json(ApiResponse::success(
+                "Fetched uploaded files successfully",
+                json!({
+                    "total_files": total_files,
+                    "files": files
+                }),
+            ))).into_response()
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
             &e,
             "FETCH_FILES_ERROR",

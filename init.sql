@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS upload_file_meta (
     checksum TEXT NOT NULL,
     status INT DEFAULT 0,
     file_path TEXT NOT NULL,
+    thumbnail_path TEXT,
     last_updated INTEGER DEFAULT 0,
     UNIQUE (file_id)
 );

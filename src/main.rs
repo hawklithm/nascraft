@@ -13,6 +13,7 @@ mod mdns_advertise;
 mod udp_discovery;
 mod ssdp;
 mod file_checker;
+mod thumbnail;
 
 use crate::config::AppConfig;
 use crate::context::AppContext;
