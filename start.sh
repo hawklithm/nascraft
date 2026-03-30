@@ -341,7 +341,7 @@ show_status() {
     echo ""
     # 检查 cron
     has_cron=0
-    if [ -n "$(crontab -l 2>/dev/null | grep "nascraft.*keepalive")" ]; then
+    if [ -n "$(crontab -l 2>/dev/null | grep "nascraft.*keepalive" || true)" ]; then
         has_cron=1
     fi
     if [ "$has_cron" -eq 1 ]; then
