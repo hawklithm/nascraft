@@ -1,42 +1,52 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 # Nascraft 启动管理脚本
 # 功能: 交互式配置 + 后台启动 + cron 保活
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Get script directory (POSIX compatible)
+SCRIPT_DIR=$(dirname "$0")
+SCRIPT_DIR=$(cd "$SCRIPT_DIR" && pwd)
 PID_FILE="$SCRIPT_DIR/nascraft.pid"
 LOG_FILE="$SCRIPT_DIR/nascraft.log"
 ENV_FILE="$SCRIPT_DIR/.env"
 
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+# 颜色定义 (only if stdout is terminal)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m' # No Color
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    NC=''
+fi
 
 info() {
-    echo -e "${GREEN}[INFO] $*${NC}"
+    printf "${GREEN}[INFO] %s${NC}\n" "$*"
 }
 
 warn() {
-    echo -e "${YELLOW}[WARN] $*${NC}"
+    printf "${YELLOW}[WARN] %s${NC}\n" "$*"
 }
 
 error() {
-    echo -e "${RED}[ERROR] $*${NC}"
+    printf "${RED}[ERROR] %s${NC}\n" "$*"
 }
 
 # 读取现有配置
 read_existing_config() {
     if [ -f "$ENV_FILE" ]; then
-        while IFS='=' read -r key value; do
+        # POSIX: use grep and while loop without process substitution
+        grep -v '^#' "$ENV_FILE" | while IFS='=' read -r key value; do
             case "$key" in
                 DATABASE_URL) DATABASE_URL="$value" ;;
                 NASCRAFT_PORT) NASCRAFT_PORT="$value" ;;
                 NASCRAFT_ENABLE_DLNA_REMOTE) NASCRAFT_ENABLE_DLNA_REMOTE="$value" ;;
             esac
-        done < <(grep -v '^#' "$ENV_FILE")
+        done
         return 0
     else
         return 1
@@ -45,35 +55,51 @@ read_existing_config() {
 
 # 询问用户
 ask() {
-    local prompt="$1"
-    local default="$2"
+    prompt="$1"
+    default="$2"
     if [ -n "$default" ]; then
-        read -p "$prompt [$default]: " input
+        printf "%s [%s]: " "$prompt" "$default"
+        read -r input
         if [ -z "$input" ]; then
-            echo "$default"
+            printf "%s" "$default"
         else
-            echo "$input"
+            printf "%s" "$input"
         fi
     else
-        read -p "$prompt: " input
-        echo "$input"
+        printf "%s: " "$prompt"
+        read -r input
+        printf "%s" "$input"
     fi
 }
 
-# 询问 yes/no
+# 询问 yes/no - POSIX compatible lowercase conversion
+to_lower() {
+    echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 ask_yesno() {
-    local prompt="$1"
-    local default="$2"
+    prompt="$1"
+    default="$2"
     if [ "$default" = "y" ]; then
-        read -p "$prompt [Y/n]: " input
-        if [ -z "$input" ] || [ "${input,,}" = "y" ] || [ "${input,,}" = "yes" ]; then
+        printf "%s [Y/n]: " "$prompt"
+        read -r input
+        if [ -z "$input" ]; then
+            return 0
+        fi
+        input=$(to_lower "$input")
+        if [ "$input" = "y" ] || [ "$input" = "yes" ]; then
             return 0
         else
             return 1
         fi
     else
-        read -p "$prompt [y/N]: " input
-        if [ "${input,,}" = "y" ] || [ "${input,,}" = "yes" ]; then
+        printf "%s [y/N]: " "$prompt"
+        read -r input
+        if [ -z "$input" ]; then
+            return 1
+        fi
+        input=$(to_lower "$input")
+        if [ "$input" = "y" ] || [ "$input" = "yes" ]; then
             return 0
         else
             return 1
@@ -84,7 +110,7 @@ ask_yesno() {
 # 检查服务是否运行
 is_running() {
     if [ -f "$PID_FILE" ]; then
-        local pid=$(cat "$PID_FILE")
+        pid=$(cat "$PID_FILE")
         if kill -0 "$pid" 2>/dev/null; then
             return 0
         else
@@ -99,7 +125,7 @@ is_running() {
 # 停止服务
 stop_service() {
     if [ -f "$PID_FILE" ]; then
-        local pid=$(cat "$PID_FILE")
+        pid=$(cat "$PID_FILE")
         if kill -0 "$pid" 2>/dev/null; then
             info "正在停止 Nascraft 服务 (PID: $pid)..."
             kill "$pid"
@@ -126,7 +152,7 @@ start_service() {
     info "正在后台启动 Nascraft..."
     cd "$SCRIPT_DIR"
     nohup ./nascraft >> "$LOG_FILE" 2>&1 &
-    local pid=$!
+    pid=$!
     echo "$pid" > "$PID_FILE"
     info "服务已启动，PID: $pid"
     info "日志文件: $LOG_FILE"
@@ -143,10 +169,10 @@ start_service() {
 setup_cron() {
     info "正在设置 cron 保活任务..."
 
-    local cron_entry="*/5 * * * * $SCRIPT_DIR/start.sh keepalive >> $SCRIPT_DIR/cron.log 2>&1"
+    cron_entry="*/5 * * * * $SCRIPT_DIR/start.sh keepalive >> $SCRIPT_DIR/cron.log 2>&1"
 
     # 获取当前用户的 crontab
-    local temp_cron=$(mktemp)
+    temp_cron=$(mktemp)
     crontab -l 2>/dev/null | grep -v "nascraft.*keepalive" > "$temp_cron"
 
     # 添加新的 cron 任务
@@ -163,7 +189,7 @@ setup_cron() {
 remove_cron() {
     info "正在移除 cron 保活任务..."
 
-    local temp_cron=$(mktemp)
+    temp_cron=$(mktemp)
     crontab -l 2>/dev/null | grep -v "nascraft.*keepalive" > "$temp_cron"
     crontab "$temp_cron"
     rm -f "$temp_cron"
@@ -178,7 +204,8 @@ keepalive_check() {
         stop_service
         start_service
     else
-        info "Nascraft 服务运行正常 (PID: $(cat $PID_FILE 2>/dev/null))"
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        info "Nascraft 服务运行正常 (PID: $pid)"
     fi
 }
 
@@ -235,23 +262,23 @@ configure() {
     fi
 
     # 写入 .env 文件
-    cat > "$ENV_FILE" << EOF
-# Nascraft configuration
-# Generated by start.sh on $(date)
-
-DATABASE_URL=sqlite:$DATABASE_URL
-NASCRAFT_PORT=$NASCRAFT_PORT
-NASCRAFT_ENABLE_DLNA_REMOTE=$NASCRAFT_ENABLE_DLNA_REMOTE
-
-# Optional: mDNS 服务类型
-# NASCRAFT_MDNS_SERVICE_TYPE=_nascraft._tcp.local.
-
-# Optional: mDNS 实例名称
-# NASCRAFT_MDNS_INSTANCE=nascraft
-
-# Optional: UDP 发现端口
-# NASCRAFT_UDP_DISCOVERY_PORT=53530
-EOF
+    {
+        echo "# Nascraft configuration"
+        echo "# Generated by start.sh on $(date)"
+        echo ""
+        echo "DATABASE_URL=sqlite:$DATABASE_URL"
+        echo "NASCRAFT_PORT=$NASCRAFT_PORT"
+        echo "NASCRAFT_ENABLE_DLNA_REMOTE=$NASCRAFT_ENABLE_DLNA_REMOTE"
+        echo ""
+        echo "# Optional: mDNS 服务类型"
+        echo "# NASCRAFT_MDNS_SERVICE_TYPE=_nascraft._tcp.local."
+        echo ""
+        echo "# Optional: mDNS 实例名称"
+        echo "# NASCRAFT_MDNS_INSTANCE=nascraft"
+        echo ""
+        echo "# Optional: UDP 发现端口"
+        echo "# NASCRAFT_UDP_DISCOVERY_PORT=53530"
+    } > "$ENV_FILE"
 
     # 创建必要的目录
     mkdir -p "$SCRIPT_DIR/data"
@@ -284,7 +311,8 @@ show_help() {
 show_status() {
     echo "=== Nascraft 状态 ==="
     if is_running; then
-        info "服务状态: 运行中 (PID: $(cat $PID_FILE))"
+        pid=$(cat "$PID_FILE")
+        info "服务状态: 运行中 (PID: $pid)"
     else
         warn "服务状态: 已停止"
     fi
@@ -300,7 +328,10 @@ show_status() {
 
 # ============ 主逻辑 ============
 
-case "${1:-configure}" in
+# Get command
+cmd="${1:-configure}"
+
+case "$cmd" in
     help)
         show_help
         ;;
