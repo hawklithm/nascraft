@@ -290,6 +290,12 @@ configure() {
 
     info "配置已保存到 $ENV_FILE"
     echo ""
+
+    if ask_yesno "是否立即启动服务并设置 cron 保活" "y"; then
+        start_service
+        setup_cron
+    fi
+
     return 0
 }
 
