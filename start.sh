@@ -54,6 +54,7 @@ read_existing_config() {
 }
 
 # 询问用户
+# 输出提示到 stdout，读取用户输入，结果存在全局变量 ASK_RESULT
 ask() {
     prompt="$1"
     default="$2"
@@ -61,14 +62,14 @@ ask() {
         printf "%s [%s]: " "$prompt" "$default"
         read -r input
         if [ -z "$input" ]; then
-            printf "%s" "$default"
+            ASK_RESULT="$default"
         else
-            printf "%s" "$input"
+            ASK_RESULT="$input"
         fi
     else
         printf "%s: " "$prompt"
         read -r input
-        printf "%s" "$input"
+        ASK_RESULT="$input"
     fi
 }
 
@@ -230,10 +231,12 @@ configure() {
     fi
 
     # 数据库路径
-    DATABASE_URL=$(ask "请输入数据库文件路径" "${DATABASE_URL:-$DATABASE_URL_DEFAULT}")
+    ask "请输入数据库文件路径" "${DATABASE_URL:-$DATABASE_URL_DEFAULT}"
+    DATABASE_URL="$ASK_RESULT"
 
     # 服务端口
-    NASCRAFT_PORT=$(ask "请输入服务监听端口" "${NASCRAFT_PORT:-$NASCRAFT_PORT_DEFAULT}")
+    ask "请输入服务监听端口" "${NASCRAFT_PORT:-$NASCRAFT_PORT_DEFAULT}"
+    NASCRAFT_PORT="$ASK_RESULT"
 
     # DLNA 远程
     if [ -z "$NASCRAFT_ENABLE_DLNA_REMOTE" ]; then
