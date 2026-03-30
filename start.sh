@@ -179,11 +179,15 @@ setup_cron() {
     # 添加新的 cron 任务
     echo "$cron_entry" >> "$temp_cron"
 
-    # 安装新的 crontab
-    crontab "$temp_cron"
-    rm -f "$temp_cron"
-
-    info "cron 保活任务已设置 (每5分钟检查一次)"
+    # 安装新的 crontab - keep temp file until crontab installs it
+    if crontab "$temp_cron"; then
+        rm -f "$temp_cron"
+        info "cron 保活任务已设置 (每5分钟检查一次)"
+    else
+        rm -f "$temp_cron"
+        error "设置 cron 保活失败，请手动添加："
+        echo "  $cron_entry"
+    fi
 }
 
 # 移除 cron 保活
