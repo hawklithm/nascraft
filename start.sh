@@ -174,7 +174,8 @@ setup_cron() {
 
     # 获取当前用户的 crontab
     temp_cron=$(mktemp)
-    crontab -l 2>/dev/null | grep -v "nascraft.*keepalive" > "$temp_cron"
+    # When crontab is empty or grep filtered everything, still write to temp file
+    { crontab -l 2>/dev/null || true; } | grep -v "nascraft.*keepalive" > "$temp_cron"
 
     # 添加新的 cron 任务
     echo "$cron_entry" >> "$temp_cron"
@@ -195,7 +196,7 @@ remove_cron() {
     info "正在移除 cron 保活任务..."
 
     temp_cron=$(mktemp)
-    crontab -l 2>/dev/null | grep -v "nascraft.*keepalive" > "$temp_cron"
+    { crontab -l 2>/dev/null || true; } | grep -v "nascraft.*keepalive" > "$temp_cron"
     crontab "$temp_cron"
     rm -f "$temp_cron"
 
