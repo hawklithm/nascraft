@@ -33,7 +33,10 @@ mkdir -p $DEPLOY_DIR/uploads
 mkdir -p $DEPLOY_DIR/thumbnails
 
 # 复制二进制文件
-cp target/release/Nascraft $DEPLOY_DIR/
+cp target/release/nascraft $DEPLOY_DIR/
+
+# 复制启动脚本
+cp start.sh $DEPLOY_DIR/
 
 # 复制示例 .env 文件
 if [ -f ".env" ]; then
