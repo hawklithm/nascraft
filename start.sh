@@ -178,7 +178,7 @@ setup_cron() {
     {
         crontab -l 2>/dev/null || true
     } | {
-        grep -v "nascraft.*keepalive" || true
+        grep -v "start.sh.*keepalive" || true
     } > "$temp_cron"
 
     # 添加新的 cron 任务
@@ -203,7 +203,7 @@ remove_cron() {
     {
         crontab -l 2>/dev/null || true
     } | {
-        grep -v "nascraft.*keepalive" || true
+        grep -v "start.sh.*keepalive" || true
     } > "$temp_cron"
     crontab "$temp_cron"
     rm -f "$temp_cron"
@@ -341,7 +341,7 @@ show_status() {
     echo ""
     # 检查 cron
     has_cron=0
-    if [ -n "$(crontab -l 2>/dev/null | grep "nascraft.*keepalive" || true)" ]; then
+    if [ -n "$(crontab -l 2>/dev/null | grep "start.sh.*keepalive" || true)" ]; then
         has_cron=1
     fi
     if [ "$has_cron" -eq 1 ]; then
