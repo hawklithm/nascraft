@@ -14,6 +14,7 @@ mod udp_discovery;
 mod ssdp;
 mod file_checker;
 mod thumbnail;
+mod dlna_renderer;
 
 use crate::config::AppConfig;
 use crate::context::AppContext;
@@ -59,10 +60,23 @@ async fn main() -> std::io::Result<()> {
     // 创建DLNA播放器实例
     let dlna_player = Arc::new(Mutex::new(crate::display_remote::DLNAPlayer::new(cfg.enable_dlna_remote).await));
 
+    // 创建DLNA渲染器管理器（主动发现电视投屏）
+    let renderer_manager = Arc::new(crate::dlna_renderer::RendererManager::new());
+
     let ctx = AppContext {
         app_state: app_state.clone(),
+        config: cfg.clone(),
         dlna_player: dlna_player.clone(),
+        renderer_manager: renderer_manager.clone(),
     };
+
+    // 如果DLNA启用，开始发现渲染器设备
+    if cfg.enable_dlna_remote {
+        info!("Starting DLNA MediaRenderer discovery");
+        renderer_manager.clone().start_discovery(&cfg).await;
+    } else {
+        info!("DLNA remote disabled, skipping renderer discovery");
+    }
 
     info!("Starting mDNS advertisement");
 
