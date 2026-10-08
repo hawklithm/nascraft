@@ -2,7 +2,6 @@ mod init_env;
 mod upload;
 mod upload_dao;
 mod download;
-mod display_remote;
 mod helper;
 mod config;
 mod logging;
@@ -28,10 +27,8 @@ use crate::ssdp::{run_ssdp_responder, run_ssdp_announcer};
 use crate::file_checker::start_file_integrity_checker;
 use crate::upload::AppState;
 use tracing::info;
-use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -51,14 +48,10 @@ async fn main() -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to initialize database pool: {}", e)))?;
 
     let app_state = Arc::new(AppState {
-        uploads: Mutex::new(HashMap::new()),
         db_pool,
     });
 
     let cfg = AppConfig::from_env();
-
-    // 创建DLNA播放器实例
-    let dlna_player = Arc::new(Mutex::new(crate::display_remote::DLNAPlayer::new(cfg.enable_dlna_remote).await));
 
     // 创建DLNA渲染器管理器（主动发现电视投屏）
     let renderer_manager = Arc::new(crate::dlna_renderer::RendererManager::new());
@@ -66,17 +59,11 @@ async fn main() -> std::io::Result<()> {
     let ctx = AppContext {
         app_state: app_state.clone(),
         config: cfg.clone(),
-        dlna_player: dlna_player.clone(),
         renderer_manager: renderer_manager.clone(),
     };
 
-    // 如果DLNA启用，开始发现渲染器设备
-    if cfg.enable_dlna_remote {
-        info!("Starting DLNA MediaRenderer discovery");
-        renderer_manager.clone().start_discovery(&cfg).await;
-    } else {
-        info!("DLNA remote disabled, skipping renderer discovery");
-    }
+    // 开始发现 DLNA 渲染器设备（原生实现，无需外部媒体服务器）
+    renderer_manager.clone().start_discovery(&cfg).await;
 
     info!("Starting mDNS advertisement");
 

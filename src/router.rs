@@ -4,10 +4,7 @@ use axum::response::{Json, IntoResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::context::AppContext;
-use crate::display_remote::{
-    browse_files, discovered_devices, hello, pause_video, play_video, resume_video, stop_video,
-};
-use crate::dlna_renderer::{self, MediaRenderer, PlaybackInfo, RendererManager};
+use crate::dlna_renderer::{MediaRenderer, PlaybackInfo};
 use crate::download::{download_file, serve_thumbnail};
 use crate::ssdp::ssdp_routes;
 use crate::upload::{
@@ -134,6 +131,10 @@ fn get_local_ip() -> String {
     }
 }
 
+async fn hello() -> &'static str {
+    "Service is alive"
+}
+
 pub fn build_router(ctx: AppContext) -> Router {
     let router = Router::new()
         .route("/api/upload", post(upload_file))
@@ -142,13 +143,6 @@ pub fn build_router(ctx: AppContext) -> Router {
         .route("/api/download/:file_id", get(download_file))
         .route("/api/thumbnail/:file_id", get(serve_thumbnail))
         .route("/api/uploaded_files", get(get_uploaded_files))
-        // Legacy DLNA (external player) API
-        .route("/api/dlna/devices", get(discovered_devices))
-        .route("/api/dlna/play", post(play_video))
-        .route("/api/dlna/pause", post(pause_video))
-        .route("/api/dlna/resume", post(resume_video))
-        .route("/api/dlna/stop", post(stop_video))
-        .route("/api/dlna/browse", post(browse_files))
         // Native DLNA renderer discovery and control API
         .route("/api/dlna/renderers", get(list_renderers))
         .route("/api/dlna/renderer/play", post(play_on_renderer))

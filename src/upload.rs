@@ -9,8 +9,6 @@ use futures::StreamExt;
 use sha2::{Sha256, Digest as ShaDigest};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, AsyncReadExt};
-use tokio::sync::Mutex;
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use log::{error, info};
@@ -27,14 +25,12 @@ use crate::upload_dao::update_file_thumbnail_path;
 
 #[derive(Debug)]
 pub struct AppState {
-    pub uploads: Mutex<HashMap<String, UploadState>>,
     pub db_pool: SqlitePool,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            uploads: Mutex::new(HashMap::new()),
             db_pool: SqlitePool::connect_lazy("sqlite::memory:").expect("failed to create default sqlite pool"),
         }
     }
@@ -230,9 +226,13 @@ pub async fn upload_file(
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
 
-        // 组合分片文件为完整文件
+        // 组合分片文件为完整文件（分片偏移按 system_config.chunk_size 生成，合并必须按同一大小步进）
+        let chunk_size = match fetch_chunk_size(db_pool).await {
+            Ok(size) => size,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        };
         let final_file_path = format!("uploads/{}", safe_filename);
-        if let Err(e) = merge_chunks(&safe_filename, total_size).await {
+        if let Err(e) = merge_chunks(&safe_filename, total_size, chunk_size).await {
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
 
@@ -293,11 +293,14 @@ pub async fn upload_file(
             .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
             .unwrap_or(file_mtime);
 
-        // 获取inode（仅Unix-like系统）
+        // 获取inode（仅Unix-like系统；Windows无inode，记为0）
+        #[cfg(unix)]
         let file_ino = std::fs::metadata(&final_file_path)
             .ok()
             .and_then(|m| std::os::unix::fs::MetadataExt::ino(&m).try_into().ok())
-            .unwrap_or(0);
+            .unwrap_or(0i64);
+        #[cfg(not(unix))]
+        let file_ino = 0i64;
 
         // 更新文件元信息
         if let Err(e) = update_file_meta_info(db_pool, &file_id, file_mtime, file_ctime, file_ino).await {
@@ -406,7 +409,6 @@ pub async fn submit_file_metadata(
     let unique_id = Uuid::new_v4().to_string();
     let file_id = unique_id.clone();
 
-    let mut uploads = ctx.app_state.uploads.lock().await;
     let upload_state = UploadState {
         id: unique_id.clone(),
         filename: safe_filename.clone(),
@@ -474,9 +476,6 @@ pub async fn submit_file_metadata(
         ))).into_response();
     }
 
-    // Save to in-memory state
-    uploads.insert(safe_filename.clone(), upload_state);
-
     (StatusCode::OK, Json(ApiResponse::success(
         "Metadata submitted successfully",
         json!({
@@ -491,7 +490,11 @@ pub async fn submit_file_metadata(
 }
 
 // 新增辅助函数
-async fn merge_chunks(filename: &str, total_size: u64) -> Result<(), String> {
+async fn merge_chunks(filename: &str, total_size: u64, chunk_size: u64) -> Result<(), String> {
+    if chunk_size == 0 {
+        return Err("Invalid chunk size".to_string());
+    }
+
     let final_file_path = format!("uploads/{}", filename);
     let mut final_file = match OpenOptions::new()
         .create(true)
@@ -505,7 +508,7 @@ async fn merge_chunks(filename: &str, total_size: u64) -> Result<(), String> {
             }
         };
 
-    for start in (0..total_size).step_by(1024 * 1024) {
+    for start in (0..total_size).step_by(chunk_size as usize) {
         let chunk_file_path = format!("uploads/{}_chunk_{}", filename, start);
         let mut chunk_file = match OpenOptions::new()
             .read(true)

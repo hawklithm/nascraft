@@ -7,7 +7,6 @@ pub struct AppConfig {
     pub mdns_service_type: String,
     pub mdns_instance_name: String,
     pub udp_discovery_port: u16,
-    pub enable_dlna_remote: bool,
     pub external_url: Option<String>,
 }
 
@@ -29,16 +28,11 @@ impl AppConfig {
             .and_then(|v| v.parse::<u16>().ok())
             .unwrap_or(53530);
 
-        let enable_dlna_remote = env::var("NASCRAFT_ENABLE_DLNA_REMOTE")
-            .ok()
-            .map(|v| v.to_lowercase() == "true" || v == "1")
-            .unwrap_or(false);
-
         let external_url = env::var("NASCRAFT_EXTERNAL_URL").ok();
 
         info!(
-            "Loaded config: server_port={}, mdns_service_type={}, mdns_instance_name={}, udp_discovery_port={}, enable_dlna_remote={}, external_url={:?}",
-            server_port, mdns_service_type, mdns_instance_name, udp_discovery_port, enable_dlna_remote, external_url
+            "Loaded config: server_port={}, mdns_service_type={}, mdns_instance_name={}, udp_discovery_port={}, external_url={:?}",
+            server_port, mdns_service_type, mdns_instance_name, udp_discovery_port, external_url
         );
 
         Self {
@@ -46,7 +40,6 @@ impl AppConfig {
             mdns_service_type,
             mdns_instance_name,
             udp_discovery_port,
-            enable_dlna_remote,
             external_url,
         }
     }

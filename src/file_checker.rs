@@ -216,10 +216,13 @@ async fn get_filesystem_meta(file_path: &str) -> Result<FileSystemMeta, String> 
         .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
         .unwrap_or_else(|_| mtime); // Windows可能不支持created()
 
-    // 尝试获取inode（仅Unix-like系统）
+    // 尝试获取inode（仅Unix-like系统；Windows无inode，返回None）
+    #[cfg(unix)]
     let ino = std::fs::metadata(file_path)
         .ok()
         .and_then(|m| std::os::unix::fs::MetadataExt::ino(&m).try_into().ok());
+    #[cfg(not(unix))]
+    let ino: Option<i64> = None;
 
     Ok(FileSystemMeta {
         mtime,
