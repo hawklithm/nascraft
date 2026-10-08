@@ -79,6 +79,21 @@ pub async fn download_file(
 ) -> Response {
     let db_pool = &ctx.app_state.db_pool;
 
+    let range_hdr = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    log::info!(
+        "Download request: file_id={}, range={}, ua={}",
+        file_id_str,
+        range_hdr,
+        ua
+    );
+
     let (filename, _, _, _, file_path) = match fetch_file_record(db_pool, &file_id_str).await {
         Ok(record) => record,
         Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -158,7 +173,10 @@ pub async fn download_file(
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_LENGTH, body_len.to_string());
+        .header(header::CONTENT_LENGTH, body_len.to_string())
+        // DLNA 渲染器拉流后若连接保持 keep-alive，部分电视无法判断流已结束而卡在"接收中"；
+        // 显式关闭连接，让设备传完即收到结束信号
+        .header(header::CONNECTION, "close");
     if status == StatusCode::PARTIAL_CONTENT {
         builder = builder.header(
             header::CONTENT_RANGE,

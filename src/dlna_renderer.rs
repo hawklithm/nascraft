@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
+use local_ip_address::list_afinet_netifas;
 use log::{info, error, debug};
 use rupnp::{Device, Service};
 use ssdp_client::{SearchTarget, URN};
@@ -41,6 +43,61 @@ pub fn xml_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// 根据文件名生成 DIDL-Lite 元数据。DLNA 渲染器据此识别媒体类型并决定是否拉流，
+/// 空 metadata 是不少电视（尤其小米/红米）SetAVTransportURI 后不播放的常见原因。
+pub fn build_didl_metadata(filename: &str, url: &str) -> String {
+    let mime = mime_guess::from_path(filename)
+        .first_or_octet_stream()
+        .to_string();
+
+    let class = if mime.starts_with("image/") {
+        "object.item.imageItem"
+    } else if mime.starts_with("video/") {
+        "object.item.videoItem"
+    } else if mime.starts_with("audio/") {
+        "object.item.audioItem"
+    } else {
+        "object.item"
+    };
+
+    let title = xml_escape(filename);
+    let escaped_url = xml_escape(url);
+    let escaped_mime = xml_escape(&mime);
+
+    format!(
+        "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" \
+         xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+         xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">\
+         <item id=\"0\" parentID=\"-1\" restricted=\"false\">\
+         <dc:title>{title}</dc:title>\
+         <upnp:class>{class}</upnp:class>\
+         <res protocolInfo=\"http-get:*:{mime}:*\">{url}</res>\
+         </item></DIDL-Lite>"
+    )
+}
+
+/// 选择与目标设备同网段的本机 IPv4 地址，用于构造电视可达的投屏 URL。
+/// 多网卡环境下 `local_ip()` 可能返回虚拟网卡地址，这里优先按 /24 前缀匹配目标设备。
+pub fn best_local_ipv4_for(target_ip: &str) -> Option<String> {
+    let target: Ipv4Addr = target_ip.parse().ok()?;
+    let ifaces = list_afinet_netifas().ok()?;
+
+    // 优先：与目标同 /24 网段
+    for (_name, ip) in &ifaces {
+        if let IpAddr::V4(v4) = ip {
+            if v4.octets()[0..3] == target.octets()[0..3] {
+                return Some(v4.to_string());
+            }
+        }
+    }
+
+    // 兜底：第一个非回环 IPv4
+    ifaces.into_iter().find_map(|(_, ip)| match ip {
+        IpAddr::V4(v4) if !v4.is_loopback() => Some(v4.to_string()),
+        _ => None,
+    })
 }
 
 /// DLNA 媒体渲染器设备（对前端的 JSON 快照）
@@ -214,6 +271,12 @@ impl RendererManager {
             .filter(|e| e.last_seen.elapsed() < DEVICE_STALE_AFTER)
             .map(|e| (e.renderer.clone(), e.playback.clone()))
             .collect()
+    }
+
+    /// 查询指定渲染器的 IP 地址（用于构造同网段的投屏 URL）
+    pub async fn renderer_ip(&self, uuid: &str) -> Option<String> {
+        let device_map = self.devices.lock().await;
+        device_map.get(uuid).map(|e| e.renderer.ip_addr.clone())
     }
 
     /// 在锁内取出可克隆的控制句柄，网络调用在锁外执行

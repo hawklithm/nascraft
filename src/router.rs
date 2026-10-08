@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use log::info;
 use crate::context::AppContext;
 use crate::upload_dao::fetch_file_record;
-use crate::dlna_renderer::{MediaRenderer, PlaybackInfo};
+use crate::dlna_renderer::{best_local_ipv4_for, build_didl_metadata, MediaRenderer, PlaybackInfo};
 use crate::download::{download_file, serve_thumbnail};
 use crate::ssdp::ssdp_routes;
 use crate::upload::{
@@ -55,30 +55,16 @@ async fn play_on_renderer(
     State(ctx): State<AppContext>,
     Json(req): Json<PlayOnRendererRequest>,
 ) -> impl IntoResponse {
-    // 构造完整的下载 URL（电视会主动来这个地址拉流，必须是它们网段可达的地址）
-    let server_url = match ctx.config.external_url.clone() {
-        Some(url) => url,
-        None => {
-            let url = format!("http://{}:{}", get_local_ip(), ctx.config.server_port);
-            log::warn!(
-                "NASCRAFT_EXTERNAL_URL 未配置，使用探测到的本机 IP: {}（多网卡/Docker 环境可能不可达，届时请配置 NASCRAFT_EXTERNAL_URL）",
-                url
-            );
-            url
-        }
-    };
-
-    let playback_url = format!("{}/api/download/{}", server_url.trim_end_matches('/'), req.file_id);
-
-    // 预校验文件确实存在于服务器磁盘，避免把无效 URL 发给电视后播放失败
-    match fetch_file_record(&ctx.app_state.db_pool, &req.file_id).await {
-        Ok((_, _, _, _, file_path)) => {
+    // 预校验文件确实存在于服务器磁盘，并拿到文件名用于生成 DIDL-Lite metadata
+    let filename = match fetch_file_record(&ctx.app_state.db_pool, &req.file_id).await {
+        Ok((filename, _, _, _, file_path)) => {
             if tokio::fs::metadata(&file_path).await.is_err() {
                 return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(
                     "400".to_string(),
                     "文件在服务器上不存在，无法投屏（可能已删除或上传未完成）".to_string(),
                 )));
             }
+            filename
         }
         Err(e) => {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(
@@ -86,11 +72,32 @@ async fn play_on_renderer(
                 format!("文件不存在: {}", e),
             )));
         }
-    }
+    };
 
-    info!("Casting file {} to renderer {} via {}", req.file_id, req.uuid, playback_url);
+    // 构造完整的下载 URL（电视会主动来这个地址拉流，必须是它们网段可达的地址）
+    let server_url = match ctx.config.external_url.clone() {
+        Some(url) => url,
+        None => {
+            // 优先选与目标电视同网段的本机 IP，多网卡环境下 local_ip() 可能选到虚拟网卡
+            let local_ip = match ctx.renderer_manager.renderer_ip(&req.uuid).await {
+                Some(target_ip) => best_local_ipv4_for(&target_ip).unwrap_or_else(get_local_ip),
+                None => get_local_ip(),
+            };
+            let url = format!("http://{}:{}", local_ip, ctx.config.server_port);
+            log::warn!(
+                "NASCRAFT_EXTERNAL_URL 未配置，投屏使用本机 IP: {}（多网卡/Docker 环境可能不可达，届时请配置 NASCRAFT_EXTERNAL_URL）",
+                url
+            );
+            url
+        }
+    };
 
-    match ctx.renderer_manager.play_uri(req.uuid.as_str(), playback_url, None).await {
+    let playback_url = format!("{}/api/download/{}", server_url.trim_end_matches('/'), req.file_id);
+    let metadata = build_didl_metadata(&filename, &playback_url);
+
+    info!("Casting file {} ({}) to renderer {} via {}", req.file_id, filename, req.uuid, playback_url);
+
+    match ctx.renderer_manager.play_uri(req.uuid.as_str(), playback_url, Some(metadata)).await {
         Ok(_) => (StatusCode::OK, Json(ApiResponse::<()>::success(()))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("500".to_string(), e))),
     }
