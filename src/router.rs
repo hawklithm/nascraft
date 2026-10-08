@@ -3,7 +3,9 @@ use axum::http::StatusCode;
 use axum::response::{Json, IntoResponse};
 use serde::{Deserialize, Serialize};
 
+use log::info;
 use crate::context::AppContext;
+use crate::upload_dao::fetch_file_record;
 use crate::dlna_renderer::{MediaRenderer, PlaybackInfo};
 use crate::download::{download_file, serve_thumbnail};
 use crate::ssdp::ssdp_routes;
@@ -44,7 +46,8 @@ pub struct DeviceListResponse {
 async fn list_renderers(
     State(ctx): State<AppContext>,
 ) -> impl IntoResponse {
-    let devices = ctx.renderer_manager.list_devices().await;
+    // 先主动搜索一轮再返回，避免只读到轮询间隙的旧缓存
+    let devices = ctx.renderer_manager.refresh_and_list().await;
     (StatusCode::OK, Json(ApiResponse::success(DeviceListResponse { devices })))
 }
 
@@ -52,11 +55,40 @@ async fn play_on_renderer(
     State(ctx): State<AppContext>,
     Json(req): Json<PlayOnRendererRequest>,
 ) -> impl IntoResponse {
-    // 构造完整的下载 URL
-    let server_url = ctx.config.external_url.clone()
-        .unwrap_or_else(|| format!("http://{}:{}", get_local_ip(), ctx.config.server_port));
+    // 构造完整的下载 URL（电视会主动来这个地址拉流，必须是它们网段可达的地址）
+    let server_url = match ctx.config.external_url.clone() {
+        Some(url) => url,
+        None => {
+            let url = format!("http://{}:{}", get_local_ip(), ctx.config.server_port);
+            log::warn!(
+                "NASCRAFT_EXTERNAL_URL 未配置，使用探测到的本机 IP: {}（多网卡/Docker 环境可能不可达，届时请配置 NASCRAFT_EXTERNAL_URL）",
+                url
+            );
+            url
+        }
+    };
 
     let playback_url = format!("{}/api/download/{}", server_url.trim_end_matches('/'), req.file_id);
+
+    // 预校验文件确实存在于服务器磁盘，避免把无效 URL 发给电视后播放失败
+    match fetch_file_record(&ctx.app_state.db_pool, &req.file_id).await {
+        Ok((_, _, _, _, file_path)) => {
+            if tokio::fs::metadata(&file_path).await.is_err() {
+                return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(
+                    "400".to_string(),
+                    "文件在服务器上不存在，无法投屏（可能已删除或上传未完成）".to_string(),
+                )));
+            }
+        }
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(
+                "400".to_string(),
+                format!("文件不存在: {}", e),
+            )));
+        }
+    }
+
+    info!("Casting file {} to renderer {} via {}", req.file_id, req.uuid, playback_url);
 
     match ctx.renderer_manager.play_uri(req.uuid.as_str(), playback_url, None).await {
         Ok(_) => (StatusCode::OK, Json(ApiResponse::<()>::success(()))),

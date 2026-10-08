@@ -12,8 +12,13 @@ use tokio::time;
 
 use crate::config::AppConfig;
 
-/// 设备连续多少秒未被重新发现，就从列表中隐藏（发现轮询间隔 30s，即约 3 轮）
-const DEVICE_STALE_AFTER: Duration = Duration::from_secs(90);
+/// 设备连续多久未被重新发现就隐藏（发现轮询间隔约 35s，10 分钟 ≈ 17 轮兜底；
+/// SSDP 多播本身不可靠，阈值过短会让设备在网络抖动后从列表消失）
+const DEVICE_STALE_AFTER: Duration = Duration::from_secs(600);
+/// 后台轮询的单轮搜索窗口
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// 打开设备列表时的即时搜索窗口（短一点，避免接口等待过久）
+const ON_DEMAND_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 const AV_TRANSPORT: &str = "AVTransport";
 const RENDERING_CONTROL: &str = "RenderingControl";
 
@@ -132,8 +137,20 @@ impl RendererManager {
         }
     }
 
-    /// 执行一次 SSDP 搜索并合并进设备表
+    /// 执行一次 SSDP 搜索（默认窗口）并合并进设备表
     async fn search_once(&self) -> Result<(), String> {
+        self.search_with_timeout(DISCOVERY_TIMEOUT).await
+    }
+
+    /// 打开设备列表时主动搜索一轮，再返回最新列表
+    pub async fn refresh_and_list(&self) -> Vec<(MediaRenderer, PlaybackInfo)> {
+        if let Err(e) = self.search_with_timeout(ON_DEMAND_DISCOVERY_TIMEOUT).await {
+            debug!("On-demand DLNA discovery round failed: {}", e);
+        }
+        self.list_devices().await
+    }
+
+    async fn search_with_timeout(&self, timeout: Duration) -> Result<(), String> {
         // UPnP standard MediaRenderer
         let urn = URN::device(
             "schemas-upnp-org",
@@ -141,7 +158,7 @@ impl RendererManager {
             1
         );
         let search_target = SearchTarget::URN(urn);
-        let devices_result = rupnp::discover(&search_target, Duration::from_secs(5)).await;
+        let devices_result = rupnp::discover(&search_target, timeout).await;
         let mut devices = match devices_result {
             Ok(devices) => Box::pin(devices),
             Err(e) => return Err(format!("Search failed: {}", e)),
