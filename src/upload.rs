@@ -16,7 +16,7 @@ use sanitize_filename::sanitize;
 use uuid::Uuid;
 use sqlx::{SqlitePool, Transaction, Sqlite};
 use crate::init_env::check_system_initialized;
-use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress, fetch_file_by_checksum, update_file_meta_info};
+use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress, fetch_file_by_checksum, fetch_incomplete_by_checksum, fetch_completed_chunk_offsets, update_file_status_cas, update_file_meta_info};
 use chrono::Utc;
 use md5::Md5;
 use crate::context::AppContext;
@@ -221,9 +221,21 @@ pub async fn upload_file(
     };
 
     if total_uploaded >= total_size {
-        // 更新文件状态为处理中
-        if let Err(e) = update_file_status_and_path(db_pool, &file_id, 0, 1, "").await {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+        // CAS：只有把 status 从 0 改成 1 成功的请求负责合并，避免并发最后分片双合并
+        let acquired = match update_file_status_cas(db_pool, &file_id, 0, 1).await {
+            Ok(acquired) => acquired,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        };
+        if !acquired {
+            info!("File {} is being finalized by another request, skipping merge", file_id);
+            return (StatusCode::OK, Json(ApiResponse::success(
+                "Upload already finalizing",
+                json!({
+                    "status": "finalizing",
+                    "filename": safe_filename,
+                    "skipped": true
+                })
+            ))).into_response();
         }
 
         // 组合分片文件为完整文件（分片偏移按 system_config.chunk_size 生成，合并必须按同一大小步进）
@@ -362,6 +374,59 @@ pub struct ChunkInfo {
     pub chunk_size: u64,
 }
 
+/// 根据文件大小和分片大小计算分片列表（与 initialize_upload_progress 的偏移规则保持一致）
+fn compute_chunks(total_size: u64, chunk_size: u64) -> Vec<ChunkInfo> {
+    if chunk_size == 0 {
+        return Vec::new();
+    }
+    let num_chunks = (total_size + chunk_size - 1) / chunk_size;
+    let mut chunks = Vec::with_capacity(num_chunks as usize);
+    for i in 0..num_chunks {
+        let start_offset = i * chunk_size;
+        let end_offset = ((i + 1) * chunk_size).min(total_size) - 1;
+        let chunk_size = end_offset - start_offset + 1;
+        chunks.push(ChunkInfo {
+            start_offset,
+            end_offset,
+            chunk_size,
+        });
+    }
+    chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_chunks_even_split() {
+        let chunks = compute_chunks(8, 4);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!((chunks[0].start_offset, chunks[0].end_offset, chunks[0].chunk_size), (0, 3, 4));
+        assert_eq!((chunks[1].start_offset, chunks[1].end_offset, chunks[1].chunk_size), (4, 7, 4));
+    }
+
+    #[test]
+    fn compute_chunks_last_chunk_truncated() {
+        let chunks = compute_chunks(10, 4);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!((chunks[2].start_offset, chunks[2].end_offset, chunks[2].chunk_size), (8, 9, 2));
+    }
+
+    #[test]
+    fn compute_chunks_single_chunk() {
+        let chunks = compute_chunks(5, 100);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!((chunks[0].start_offset, chunks[0].end_offset, chunks[0].chunk_size), (0, 4, 5));
+    }
+
+    #[test]
+    fn compute_chunks_empty_and_zero_size() {
+        assert!(compute_chunks(0, 4).is_empty());
+        assert!(compute_chunks(10, 0).is_empty());
+    }
+}
+
 pub async fn submit_file_metadata(
     State(ctx): State<AppContext>,
     Json(metadata): Json<FileMetadata>,
@@ -396,6 +461,44 @@ pub async fn submit_file_metadata(
         }
         Ok(None) => {
             info!("File with checksum {} not found, proceeding with upload", metadata.checksum);
+
+            // 查找同 checksum 的未完成上传记录：客户端重传时复用原记录，跳过已完成分片（断点续传）
+            match fetch_incomplete_by_checksum(db_pool, &metadata.checksum).await {
+                Ok(Some((existing_file_id, existing_total_size))) if existing_total_size == metadata.total_size as i64 => {
+                    let chunk_size = fetch_chunk_size(db_pool).await.unwrap_or(1024 * 1024);
+                    let chunks = compute_chunks(metadata.total_size, chunk_size);
+                    let uploaded_chunks = fetch_completed_chunk_offsets(db_pool, &existing_file_id).await.unwrap_or_default();
+                    info!(
+                        "Resuming upload for checksum {} as file_id {} ({} of {} chunks already uploaded)",
+                        metadata.checksum, existing_file_id, uploaded_chunks.len(), chunks.len()
+                    );
+                    return (StatusCode::OK, Json(ApiResponse::success(
+                        "Resuming previous upload",
+                        json!({
+                            "status": "resume",
+                            "id": existing_file_id,
+                            "filename": safe_filename,
+                            "total_size": metadata.total_size,
+                            "checksum": metadata.checksum,
+                            "chunk_size": chunk_size,
+                            "total_chunks": chunks.len(),
+                            "chunks": chunks,
+                            "uploaded_chunks": uploaded_chunks,
+                            "skipped": false
+                        })
+                    ))).into_response();
+                }
+                Ok(_) => {
+                    info!("No resumable record for checksum {}, starting fresh upload", metadata.checksum);
+                }
+                Err(e) => {
+                    error!("Failed to check resumable upload: {}", e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
+                        "RESUME_CHECK_ERROR",
+                        &e,
+                    ))).into_response();
+                }
+            }
         }
         Err(e) => {
             error!("Failed to check file by checksum: {}", e);
@@ -446,25 +549,14 @@ pub async fn submit_file_metadata(
         }
     };
 
-    // Calculate number of chunks and initialize upload_progress table
-    let num_chunks = (metadata.total_size + chunk_size - 1) / chunk_size;
-    let mut chunks = Vec::new();
+    // 计算分片并初始化 upload_progress 表
+    let chunks = compute_chunks(metadata.total_size, chunk_size);
 
-    for i in 0..num_chunks {
-        let start_offset = i * chunk_size;
-        let end_offset = ((i + 1) * chunk_size).min(metadata.total_size)-1;
-            let chunk_size= end_offset - start_offset+1;
-
-        if let Err(e) = initialize_upload_progress(&mut tx, &file_id, &safe_filename, chunk_size, start_offset, end_offset).await {
+    for chunk in &chunks {
+        if let Err(e) = initialize_upload_progress(&mut tx, &file_id, &safe_filename, chunk.chunk_size, chunk.start_offset, chunk.end_offset).await {
             tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
-
-        chunks.push(ChunkInfo {
-            start_offset,
-            end_offset,
-            chunk_size,
-        });
     }
 
     // Commit the transaction
@@ -483,7 +575,7 @@ pub async fn submit_file_metadata(
             "filename": safe_filename,
             "total_size": metadata.total_size,
             "chunk_size": chunk_size,
-            "total_chunks": num_chunks,
+            "total_chunks": chunks.len(),
             "chunks": chunks
         })
     ))).into_response()

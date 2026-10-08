@@ -295,6 +295,101 @@ pub async fn fetch_file_by_checksum(db_pool: &SqlitePool, checksum: &str) -> Res
     }
 }
 
+/// 查找同 checksum 的未完成上传记录（status=0，合并未开始），用于断点续传。
+/// 返回 (file_id, total_size)，仅当 total_size 一致才可安全复用分片进度。
+pub async fn fetch_incomplete_by_checksum(db_pool: &SqlitePool, checksum: &str) -> Result<Option<(String, i64)>, String> {
+    match sqlx::query_as::<_, (String, i64)>(
+        "SELECT file_id, total_size FROM upload_file_meta WHERE checksum = ? AND status = 0 LIMIT 1",
+    )
+    .bind(checksum)
+    .fetch_optional(db_pool)
+    .await
+    {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            error!("Failed to fetch incomplete file by checksum: {}", e);
+            Err("Failed to fetch incomplete file by checksum".to_string())
+        }
+    }
+}
+
+/// 查询某文件已完成上传的分片起始偏移（uploaded_size 覆盖整个分片）
+pub async fn fetch_completed_chunk_offsets(db_pool: &SqlitePool, file_id: &str) -> Result<Vec<i64>, String> {
+    match sqlx::query_as::<_, (i64,)>(
+        "SELECT start_offset FROM upload_progress WHERE file_id = ? AND uploaded_size >= (end_offset - start_offset + 1)",
+    )
+    .bind(file_id)
+    .fetch_all(db_pool)
+    .await
+    {
+        Ok(rows) => Ok(rows.into_iter().map(|(offset,)| offset).collect()),
+        Err(e) => {
+            error!("Failed to fetch completed chunk offsets: {}", e);
+            Err("Failed to fetch completed chunk offsets".to_string())
+        }
+    }
+}
+
+/// CAS 状态流转：仅当当前 status 等于 expected 时更新为 new_status，返回是否抢到
+pub async fn update_file_status_cas(db_pool: &SqlitePool, file_id: &str, expected_status: i32, new_status: i32) -> Result<bool, String> {
+    match sqlx::query(
+        "UPDATE upload_file_meta SET status = ?, last_updated = strftime('%s', 'now') WHERE file_id = ? AND status = ?",
+    )
+    .bind(new_status)
+    .bind(file_id)
+    .bind(expected_status)
+    .execute(db_pool)
+    .await
+    {
+        Ok(result) => Ok(result.rows_affected() > 0),
+        Err(e) => {
+            error!("Failed to CAS file status: {}", e);
+            Err("Failed to CAS file status".to_string())
+        }
+    }
+}
+
+/// 清理上传僵尸记录：上传中途被遗弃、超过 staleness_days 天仍未完成（status 0/1）的记录。
+/// 返回被清理掉的原文件名列表，供调用方删除磁盘上残留的分片文件。
+pub async fn cleanup_zombie_uploads(db_pool: &SqlitePool, staleness_days: i64) -> Result<Vec<String>, String> {
+    let stale_records = match sqlx::query_as::<_, (String, String)>(
+        "SELECT file_id, filename FROM upload_file_meta WHERE status IN (0, 1) AND last_updated < strftime('%s', 'now') - (? * 86400)",
+    )
+    .bind(staleness_days)
+    .fetch_all(db_pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("Failed to query zombie uploads: {}", e);
+            return Err("Failed to query zombie uploads".to_string());
+        }
+    };
+
+    let mut cleaned_filenames = Vec::new();
+    for (file_id, filename) in &stale_records {
+        if let Err(e) = sqlx::query("DELETE FROM upload_progress WHERE file_id = ?")
+            .bind(file_id)
+            .execute(db_pool)
+            .await
+        {
+            error!("Failed to delete zombie progress rows for {}: {}", file_id, e);
+            continue;
+        }
+        if let Err(e) = sqlx::query("DELETE FROM upload_file_meta WHERE file_id = ?")
+            .bind(file_id)
+            .execute(db_pool)
+            .await
+        {
+            error!("Failed to delete zombie record {}: {}", file_id, e);
+            continue;
+        }
+        cleaned_filenames.push(filename.clone());
+    }
+
+    Ok(cleaned_filenames)
+}
+
 /// Fetch a complete UploadedFile by file_id
 pub async fn fetch_uploaded_file_by_id(db_pool: &SqlitePool, file_id: &str) -> Result<Option<UploadedFile>, String> {
     match sqlx::query_as::<_, UploadedFile>(

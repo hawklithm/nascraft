@@ -22,6 +22,9 @@ pub async fn start_file_integrity_checker(db_pool: SqlitePool) {
             if let Err(e) = check_and_update_file_integrity(&db_pool).await {
                 error!("File integrity check failed: {}", e);
             }
+
+            // 清理过期未完成的上传僵尸记录（DB 行 + 磁盘残留分片）
+            cleanup_zombie_upload_records(&db_pool).await;
         }
     });
 }
@@ -199,6 +202,44 @@ async fn check_and_update_file_integrity(db_pool: &SqlitePool) -> Result<(), Str
     );
 
     Ok(())
+}
+
+/// 清理上传僵尸记录：上传中途被遗弃、超过 7 天仍未完成（status 0/1）的记录，
+/// 连同磁盘上残留的分片文件一起删除。
+async fn cleanup_zombie_upload_records(db_pool: &SqlitePool) {
+    const ZOMBIE_STALE_DAYS: i64 = 7;
+    match crate::upload_dao::cleanup_zombie_uploads(db_pool, ZOMBIE_STALE_DAYS).await {
+        Ok(filenames) => {
+            let count = filenames.len();
+            for filename in filenames {
+                // 删除 uploads/{filename}_chunk_* 残留分片
+                let dir = "uploads".to_string();
+                let prefix = format!("{}_chunk_", filename);
+                let result = tokio::task::spawn_blocking(move || {
+                    if let Ok(entries) = std::fs::read_dir(&dir) {
+                        for entry in entries.flatten() {
+                            let name = entry.file_name();
+                            if name.to_string_lossy().starts_with(&prefix) {
+                                if let Err(e) = std::fs::remove_file(entry.path()) {
+                                    error!("Failed to remove stale chunk file {}: {}", entry.path().display(), e);
+                                }
+                            }
+                        }
+                    }
+                })
+                .await;
+                if let Err(e) = result {
+                    error!("Failed to run chunk file cleanup task: {}", e);
+                }
+            }
+            if count > 0 {
+                info!("Cleaned up {} zombie upload record(s)", count);
+            }
+        }
+        Err(e) => {
+            warn!("Zombie upload cleanup failed: {}", e);
+        }
+    }
 }
 
 /// 获取文件的文件系统元信息
