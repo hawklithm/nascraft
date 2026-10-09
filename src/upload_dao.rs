@@ -135,9 +135,10 @@ pub async fn save_upload_state_to_db(
     checksum: &str,
     source_device: Option<&str>,
     file_path: &str,
+    chunk_size: u64,
 ) -> Result<(), String> {
     if let Err(e) = sqlx::query(
-        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum, file_path, source_device, file_mtime, file_ctime, file_ino) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0)"
+        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum, file_path, source_device, chunk_size, file_mtime, file_ctime, file_ino) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0)"
     )
     .bind(file_id)
     .bind(filename)
@@ -145,6 +146,7 @@ pub async fn save_upload_state_to_db(
     .bind(checksum)
     .bind(file_path)
     .bind(source_device)
+    .bind(chunk_size as i64)
     .execute(&mut **tx)
     .await
     {
@@ -201,6 +203,28 @@ pub struct UploadedFile {
 
 const IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "gif", "webp", "bmp"];
 const VIDEO_EXTS: [&str; 8] = ["mp4", "webm", "mkv", "avi", "mov", "flv", "wmv", "m4v"];
+
+/// 默认分片大小（图片/其他文件），与 system_config.chunk_size 的回退值一致
+pub const DEFAULT_CHUNK_SIZE: u64 = 2 * 1024 * 1024;
+/// 视频分片大小：视频体积大，用更大分片减少 HTTP 请求数与断点续传碎片
+pub const VIDEO_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
+
+/// 按扩展名判断是否为视频文件
+pub fn is_video_filename(filename: &str) -> bool {
+    let lower = filename.to_lowercase();
+    VIDEO_EXTS.iter().any(|ext| lower.ends_with(&format!(".{}", ext)))
+}
+
+/// 根据文件名解析该文件应使用的分片大小。
+/// 视频用 VIDEO_CHUNK_SIZE（与系统配置取较大者），其余用系统配置的默认值。
+pub fn resolve_chunk_size(filename: &str, configured_default: u64) -> u64 {
+    let base = if configured_default > 0 { configured_default } else { DEFAULT_CHUNK_SIZE };
+    if is_video_filename(filename) {
+        base.max(VIDEO_CHUNK_SIZE)
+    } else {
+        base
+    }
+}
 
 fn exts_like(exts: &[&str]) -> String {
     exts.iter()
@@ -381,10 +405,10 @@ pub async fn fetch_file_by_checksum(db_pool: &SqlitePool, checksum: &str) -> Res
 }
 
 /// 查找同 checksum 的未完成上传记录（status=0，合并未开始），用于断点续传。
-/// 返回 (file_id, total_size)，仅当 total_size 一致才可安全复用分片进度。
-pub async fn fetch_incomplete_by_checksum(db_pool: &SqlitePool, checksum: &str) -> Result<Option<(String, i64)>, String> {
-    match sqlx::query_as::<_, (String, i64)>(
-        "SELECT file_id, total_size FROM upload_file_meta WHERE checksum = ? AND status = 0 LIMIT 1",
+/// 返回 (file_id, total_size, chunk_size)，仅当 total_size 一致才可安全复用分片进度。
+pub async fn fetch_incomplete_by_checksum(db_pool: &SqlitePool, checksum: &str) -> Result<Option<(String, i64, i64)>, String> {
+    match sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT file_id, total_size, chunk_size FROM upload_file_meta WHERE checksum = ? AND status = 0 LIMIT 1",
     )
     .bind(checksum)
     .fetch_optional(db_pool)
@@ -394,6 +418,24 @@ pub async fn fetch_incomplete_by_checksum(db_pool: &SqlitePool, checksum: &str) 
         Err(e) => {
             error!("Failed to fetch incomplete file by checksum: {}", e);
             Err("Failed to fetch incomplete file by checksum".to_string())
+        }
+    }
+}
+
+/// 查询某文件持久化的分片大小；0 表示旧记录未存（调用方应回退到默认配置）
+pub async fn fetch_file_chunk_size(db_pool: &SqlitePool, file_id: &str) -> Result<u64, String> {
+    match sqlx::query("SELECT chunk_size FROM upload_file_meta WHERE file_id = ?")
+        .bind(file_id)
+        .fetch_one(db_pool)
+        .await
+    {
+        Ok(row) => {
+            let chunk_size: i64 = row.get("chunk_size");
+            Ok(chunk_size.max(0) as u64)
+        }
+        Err(e) => {
+            error!("Failed to fetch file chunk size: {}", e);
+            Err("Failed to fetch file chunk size".to_string())
         }
     }
 }

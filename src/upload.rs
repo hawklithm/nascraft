@@ -16,7 +16,7 @@ use sanitize_filename::sanitize;
 use uuid::Uuid;
 use sqlx::{SqlitePool, Transaction, Sqlite};
 use crate::init_env::check_system_initialized;
-use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress, fetch_file_by_checksum, fetch_incomplete_by_checksum, fetch_completed_chunk_offsets, update_file_status_cas, update_file_meta_info};
+use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress, fetch_file_by_checksum, fetch_incomplete_by_checksum, fetch_completed_chunk_offsets, update_file_status_cas, update_file_meta_info, fetch_file_chunk_size, resolve_chunk_size};
 use chrono::Utc;
 use md5::Md5;
 use crate::context::AppContext;
@@ -45,11 +45,12 @@ pub struct UploadState {
     pub total_size: u64,
     pub checksum: String,
     pub source_device: Option<String>,
+    pub chunk_size: u64,
 }
 
 impl UploadState {
     pub async fn save_to_db(&self, tx: &mut Transaction<'_, Sqlite>, file_path: &str) -> Result<(), String> {
-        save_upload_state_to_db(tx, &self.id, &self.filename, self.total_size, &self.checksum, self.source_device.as_deref(), file_path).await
+        save_upload_state_to_db(tx, &self.id, &self.filename, self.total_size, &self.checksum, self.source_device.as_deref(), file_path, self.chunk_size).await
     }
 }
 
@@ -241,9 +242,11 @@ pub async fn upload_file(
             ))).into_response();
         }
 
-        // 组合分片文件为完整文件（分片偏移按 system_config.chunk_size 生成，合并必须按同一大小步进）
-        let chunk_size = match fetch_chunk_size(db_pool).await {
-            Ok(size) => size,
+        // 组合分片文件为完整文件（分片偏移按该文件持久化的 chunk_size 生成，合并必须用同一大小步进）
+        let chunk_size = match fetch_file_chunk_size(db_pool, &file_id).await {
+            Ok(size) if size > 0 => size,
+            // 旧记录未存 chunk_size，回退到系统默认配置
+            Ok(_) => fetch_chunk_size(db_pool).await.unwrap_or(1024 * 1024),
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         };
         let final_file_path = format!("uploads/{}", safe_filename);
@@ -478,8 +481,15 @@ pub async fn submit_file_metadata(
 
             // 查找同 checksum 的未完成上传记录：客户端重传时复用原记录，跳过已完成分片（断点续传）
             match fetch_incomplete_by_checksum(db_pool, &metadata.checksum).await {
-                Ok(Some((existing_file_id, existing_total_size))) if existing_total_size == metadata.total_size as i64 => {
-                    let chunk_size = fetch_chunk_size(db_pool).await.unwrap_or(1024 * 1024);
+                Ok(Some((existing_file_id, existing_total_size, existing_chunk_size))) if existing_total_size == metadata.total_size as i64 => {
+                    // 断点续传必须复用该文件原本的分片大小，否则分片偏移与已存进度错位
+                    let chunk_size = if existing_chunk_size > 0 {
+                        existing_chunk_size as u64
+                    } else {
+                        // 旧记录未持久化 chunk_size，回退到按文件名解析
+                        let configured = fetch_chunk_size(db_pool).await.unwrap_or(1024 * 1024);
+                        resolve_chunk_size(&safe_filename, configured)
+                    };
                     let chunks = compute_chunks(metadata.total_size, chunk_size);
                     let uploaded_chunks = fetch_completed_chunk_offsets(db_pool, &existing_file_id).await.unwrap_or_default();
                     info!(
@@ -526,12 +536,26 @@ pub async fn submit_file_metadata(
     let unique_id = Uuid::new_v4().to_string();
     let file_id = unique_id.clone();
 
+    // Get chunk size configuration
+    let configured_chunk_size = match fetch_chunk_size(db_pool).await {
+        Ok(size) => size,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
+                &e,
+                "FETCH_CHUNK_SIZE_ERROR"
+            ))).into_response();
+        }
+    };
+    // 按文件类型解析分片大小：视频用更大分片，减少 HTTP 请求数与断点续传碎片
+    let chunk_size = resolve_chunk_size(&safe_filename, configured_chunk_size);
+
     let upload_state = UploadState {
         id: unique_id.clone(),
         filename: safe_filename.clone(),
         total_size: metadata.total_size,
         checksum: metadata.checksum.clone(),
         source_device: metadata.source_device.clone(),
+        chunk_size,
     };
 
     // Start a transaction
@@ -551,18 +575,6 @@ pub async fn submit_file_metadata(
             "DB_SAVE_ERROR"
         ))).into_response();
     }
-
-    // Get chunk size configuration
-    let chunk_size = match fetch_chunk_size(db_pool).await {
-        Ok(size) => size,
-        Err(e) => {
-            tx.rollback().await.unwrap_or_else(|e| error!("Failed to rollback transaction: {}", e));
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
-                &e,
-                "FETCH_CHUNK_SIZE_ERROR"
-            ))).into_response();
-        }
-    };
 
     // 计算分片并初始化 upload_progress 表
     let chunks = compute_chunks(metadata.total_size, chunk_size);
