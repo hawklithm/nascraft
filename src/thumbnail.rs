@@ -1,6 +1,8 @@
 use image::{ImageFormat, io::Reader as ImageReader, GenericImageView};
 use log::{info, error};
 use std::path::Path;
+use std::process::Command;
+use std::env;
 use tokio::fs;
 
 /// Configuration for thumbnail generation
@@ -124,4 +126,67 @@ fn generate_thumbnail_sync(original_path: &str, max_size: u32) -> Result<Vec<u8>
 pub async fn thumbnail_exists(config: &ThumbnailConfig, checksum: &str) -> bool {
     let thumbnail_path = format!("{}/{}.webp", config.thumbnails_dir, checksum);
     fs::metadata(&thumbnail_path).await.is_ok()
+}
+
+/// 提取视频第一帧作为缩略图（依赖系统 ffmpeg）
+/// ffmpeg 路径可通过环境变量 FFMPEG_PATH 覆盖，默认使用 PATH 中的 "ffmpeg"。
+/// 输出与图片缩略图一致的 WebP 格式（供 serve_thumbnail 以 image/webp 提供）。
+/// ffmpeg 缺失或失败时返回 None（视频无缩略图，客户端回退为图标），不影响上传。
+pub async fn generate_video_thumbnail(
+    config: &ThumbnailConfig,
+    original_path: &str,
+    checksum: &str,
+) -> Option<String> {
+    // Ensure thumbnails directory exists
+    if let Err(e) = fs::create_dir_all(&config.thumbnails_dir).await {
+        error!("Failed to create thumbnails directory: {}", e);
+        return None;
+    }
+
+    let thumbnail_path = format!("{}/{}.webp", config.thumbnails_dir, checksum);
+
+    let ffmpeg_path = env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".to_string());
+    let ffmpeg_path_log = ffmpeg_path.clone();
+    let input = original_path.to_string();
+    let output = thumbnail_path.clone();
+    // 宽度不超过 max_size 且不放大（min），高度按比例取偶（-2）
+    let scale_filter = format!("scale='min({},iw)':-2", config.max_size);
+
+    let result = tokio::task::spawn_blocking(move || {
+        Command::new(&ffmpeg_path)
+            .arg("-y")
+            .arg("-t").arg("1")
+            .arg("-i").arg(&input)
+            .arg("-frames:v").arg("1")
+            .arg("-vf").arg(&scale_filter)
+            .arg("-f").arg("webp")
+            .arg(&output)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+    }).await;
+
+    match result {
+        Ok(Ok(status)) if status.success() => {
+            if fs::metadata(&thumbnail_path).await.is_ok() {
+                info!("Video thumbnail generated: {}", thumbnail_path);
+                Some(thumbnail_path)
+            } else {
+                error!("ffmpeg succeeded but thumbnail file missing: {}", thumbnail_path);
+                None
+            }
+        }
+        Ok(Ok(status)) => {
+            error!("ffmpeg exited with status {} for {}", status, original_path);
+            None
+        }
+        Ok(Err(e)) => {
+            error!("Failed to run ffmpeg (is it installed? FFMPEG_PATH={}): {}", ffmpeg_path_log, e);
+            None
+        }
+        Err(e) => {
+            error!("Video thumbnail task panicked: {}", e);
+            None
+        }
+    }
 }

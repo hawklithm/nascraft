@@ -5,7 +5,7 @@ use tokio::io::AsyncReadExt;
 use md5::{Md5, Digest};
 use std::time::Duration;
 use crate::upload_dao::update_file_meta_info;
-use crate::thumbnail::{is_image_file, generate_thumbnail, ThumbnailConfig};
+use crate::thumbnail::{is_image_file, is_video_file, generate_thumbnail, generate_video_thumbnail, ThumbnailConfig};
 use crate::upload_dao::update_file_thumbnail_path;
 
 /// 定期检查文件元信息是否发生变化
@@ -177,15 +177,27 @@ async fn check_and_update_file_integrity(db_pool: &SqlitePool) -> Result<(), Str
             }
         }
 
-        // Generate thumbnail if image file and no thumbnail exists
-        if is_image_file(&filename) && stored_thumbnail_path.is_none() {
-            info!("Generating thumbnail for existing image: {} (file_id: {})", filename, file_id);
-            if let Some(thumbnail_path) = generate_thumbnail(&thumbnail_config, &file_path, &stored_checksum).await {
-                if let Err(e) = update_file_thumbnail_path(db_pool, &file_id, &thumbnail_path).await {
-                    error!("Failed to save thumbnail path for existing image: {}", e);
-                } else {
-                    info!("Thumbnail generated for existing image: {} (file_id: {})", filename, file_id);
-                    thumbnails_generated_count += 1;
+        // Generate thumbnail if image/video file and no thumbnail exists
+        if stored_thumbnail_path.is_none() {
+            if is_image_file(&filename) {
+                info!("Generating thumbnail for existing image: {} (file_id: {})", filename, file_id);
+                if let Some(thumbnail_path) = generate_thumbnail(&thumbnail_config, &file_path, &stored_checksum).await {
+                    if let Err(e) = update_file_thumbnail_path(db_pool, &file_id, &thumbnail_path).await {
+                        error!("Failed to save thumbnail path for existing image: {}", e);
+                    } else {
+                        info!("Thumbnail generated for existing image: {} (file_id: {})", filename, file_id);
+                        thumbnails_generated_count += 1;
+                    }
+                }
+            } else if is_video_file(&filename) {
+                info!("Generating thumbnail for existing video: {} (file_id: {})", filename, file_id);
+                if let Some(thumbnail_path) = generate_video_thumbnail(&thumbnail_config, &file_path, &stored_checksum).await {
+                    if let Err(e) = update_file_thumbnail_path(db_pool, &file_id, &thumbnail_path).await {
+                        error!("Failed to save thumbnail path for existing video: {}", e);
+                    } else {
+                        info!("Thumbnail generated for existing video: {} (file_id: {})", filename, file_id);
+                        thumbnails_generated_count += 1;
+                    }
                 }
             }
         }

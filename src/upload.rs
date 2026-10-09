@@ -20,7 +20,7 @@ use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_upl
 use chrono::Utc;
 use md5::Md5;
 use crate::context::AppContext;
-use crate::thumbnail::{is_image_file, generate_thumbnail, ThumbnailConfig};
+use crate::thumbnail::{is_image_file, is_video_file, generate_thumbnail, generate_video_thumbnail, ThumbnailConfig};
 use crate::upload_dao::update_file_thumbnail_path;
 use crate::upload_dao::fetch_distinct_source_devices;
 use crate::exif_parser::parse_and_store_taken_at;
@@ -331,7 +331,7 @@ pub async fn upload_file(
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
 
-        // Generate thumbnail if this is an image file
+        // Generate thumbnail if this is an image or video file
         if is_image_file(&safe_filename) {
             let config = ThumbnailConfig::default();
             if let Some(thumbnail_path) = generate_thumbnail(&config, &final_file_path, &calculated_md5).await {
@@ -340,6 +340,20 @@ pub async fn upload_file(
                     // Don't fail the upload if thumbnail generation fails
                 }
             }
+        } else if is_video_file(&safe_filename) {
+            // 视频缩略图（ffmpeg 提取第一帧）放后台执行，不阻塞上传完成响应
+            let config = ThumbnailConfig::default();
+            let pool = ctx.app_state.db_pool.clone();
+            let fid = file_id.clone();
+            let final_path = final_file_path.clone();
+            let md5 = calculated_md5.clone();
+            tokio::spawn(async move {
+                if let Some(thumbnail_path) = generate_video_thumbnail(&config, &final_path, &md5).await {
+                    if let Err(e) = update_file_thumbnail_path(&pool, &fid, &thumbnail_path).await {
+                        error!("Failed to save video thumbnail path: {}", e);
+                    }
+                }
+            });
         }
 
         // 异步解析 EXIF 拍摄时间（不阻塞上传响应；后台 worker 也会定时兜底）
