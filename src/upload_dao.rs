@@ -408,11 +408,13 @@ pub async fn fetch_file_by_checksum(db_pool: &SqlitePool, checksum: &str) -> Res
     }
 }
 
-/// 查找同 checksum 的未完成上传记录（status=0，合并未开始），用于断点续传。
-/// 返回 (file_id, total_size, chunk_size)，仅当 total_size 一致才可安全复用分片进度。
-pub async fn fetch_incomplete_by_checksum(db_pool: &SqlitePool, checksum: &str) -> Result<Option<(String, i64, i64)>, String> {
-    match sqlx::query_as::<_, (String, i64, i64)>(
-        "SELECT file_id, total_size, chunk_size FROM upload_file_meta WHERE checksum = ? AND status = 0 LIMIT 1",
+/// 查找同 checksum 的未完成上传记录（status=0 上传中 / status=1 处理中），用于断点续传。
+/// 返回 (file_id, total_size, chunk_size, status)，仅当 total_size 一致才可安全复用分片进度。
+/// status=1 是「分片已传完但合并/校验失败或中断」的僵尸状态，也纳入查找，
+/// 调用方需将其重置（清空进度、回退 status=0）后再续传。
+pub async fn fetch_incomplete_by_checksum(db_pool: &SqlitePool, checksum: &str) -> Result<Option<(String, i64, i64, i32)>, String> {
+    match sqlx::query_as::<_, (String, i64, i64, i32)>(
+        "SELECT file_id, total_size, chunk_size, status FROM upload_file_meta WHERE checksum = ? AND status IN (0, 1) LIMIT 1",
     )
     .bind(checksum)
     .fetch_optional(db_pool)
@@ -422,6 +424,21 @@ pub async fn fetch_incomplete_by_checksum(db_pool: &SqlitePool, checksum: &str) 
         Err(e) => {
             error!("Failed to fetch incomplete file by checksum: {}", e);
             Err("Failed to fetch incomplete file by checksum".to_string())
+        }
+    }
+}
+
+/// 清空某文件的全部上传进度记录，用于合并失败/中断后回退，让客户端从头重传。
+pub async fn clear_upload_progress(db_pool: &SqlitePool, file_id: &str) -> Result<(), String> {
+    match sqlx::query("DELETE FROM upload_progress WHERE file_id = ?")
+        .bind(file_id)
+        .execute(db_pool)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            error!("Failed to clear upload progress for {}: {}", file_id, e);
+            Err("Failed to clear upload progress".to_string())
         }
     }
 }

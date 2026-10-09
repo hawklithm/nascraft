@@ -16,7 +16,7 @@ use sanitize_filename::sanitize;
 use uuid::Uuid;
 use sqlx::{SqlitePool, Transaction, Sqlite};
 use crate::init_env::check_system_initialized;
-use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress, fetch_file_by_checksum, fetch_incomplete_by_checksum, fetch_completed_chunk_offsets, update_file_status_cas, update_file_meta_info, fetch_file_chunk_size, resolve_chunk_size};
+use crate::upload_dao::{fetch_file_record, update_upload_progress, get_total_uploaded, update_file_status_and_path, fetch_chunk_size, initialize_upload_progress, save_upload_state_to_db, fetch_uploaded_files, fetch_total_uploaded_files,  fetch_upload_progress, fetch_file_by_checksum, fetch_incomplete_by_checksum, fetch_completed_chunk_offsets, update_file_status_cas, update_file_meta_info, fetch_file_chunk_size, resolve_chunk_size, clear_upload_progress};
 use chrono::Utc;
 use md5::Md5;
 use crate::context::AppContext;
@@ -251,6 +251,8 @@ pub async fn upload_file(
         };
         let final_file_path = format!("uploads/{}", safe_filename);
         if let Err(e) = merge_chunks(&safe_filename, total_size, chunk_size).await {
+            error!("Failed to merge chunks for {}: {}", file_id, e);
+            rollback_finalize(db_pool, &file_id, &final_file_path).await;
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
 
@@ -289,6 +291,8 @@ pub async fn upload_file(
 
         // 比较哈希值
         if calculated_md5 != expected_md5 {
+            error!("MD5 mismatch for file_id {} (expected {}), rolling back", file_id, expected_md5);
+            rollback_finalize(db_pool, &file_id, &final_file_path).await;
             return (StatusCode::INTERNAL_SERVER_ERROR, "File is corrupted: MD5 hash mismatch").into_response();
         }
 
@@ -495,7 +499,23 @@ pub async fn submit_file_metadata(
 
             // 查找同 checksum 的未完成上传记录：客户端重传时复用原记录，跳过已完成分片（断点续传）
             match fetch_incomplete_by_checksum(db_pool, &metadata.checksum).await {
-                Ok(Some((existing_file_id, existing_total_size, existing_chunk_size))) if existing_total_size == metadata.total_size as i64 => {
+                Ok(Some((existing_file_id, existing_total_size, existing_chunk_size, existing_status))) if existing_total_size == metadata.total_size as i64 => {
+                    // status=1 表示之前已进入合并/校验阶段但失败或中断（僵尸）。
+                    // 该状态既不在 completed 也不在 uploading 查询范围内，若不处理会重复建记录。
+                    // 这里把僵尸重置为 status=0 并清空分片进度，让客户端从头重传。
+                    if existing_status == 1 {
+                        info!(
+                            "Found stuck status=1 record for checksum {} (file_id {}), resetting to re-upload",
+                            metadata.checksum, existing_file_id
+                        );
+                        if let Err(e) = clear_upload_progress(db_pool, &existing_file_id).await {
+                            error!("Failed to clear progress of stuck record {}: {}", existing_file_id, e);
+                        }
+                        if let Err(e) = update_file_status_cas(db_pool, &existing_file_id, 1, 0).await {
+                            error!("Failed to reset stuck record {} to status 0: {}", existing_file_id, e);
+                        }
+                    }
+
                     // 断点续传必须复用该文件原本的分片大小，否则分片偏移与已存进度错位
                     let chunk_size = if existing_chunk_size > 0 {
                         existing_chunk_size as u64
@@ -505,7 +525,12 @@ pub async fn submit_file_metadata(
                         resolve_chunk_size(&safe_filename, configured)
                     };
                     let chunks = compute_chunks(metadata.total_size, chunk_size);
-                    let uploaded_chunks = fetch_completed_chunk_offsets(db_pool, &existing_file_id).await.unwrap_or_default();
+                    let uploaded_chunks = if existing_status == 1 {
+                        // 僵尸已重置，进度已清空，客户端应重传全部分片
+                        Vec::new()
+                    } else {
+                        fetch_completed_chunk_offsets(db_pool, &existing_file_id).await.unwrap_or_default()
+                    };
                     info!(
                         "Resuming upload for checksum {} as file_id {} ({} of {} chunks already uploaded)",
                         metadata.checksum, existing_file_id, uploaded_chunks.len(), chunks.len()
@@ -622,7 +647,23 @@ pub async fn submit_file_metadata(
     ))).into_response()
 }
 
-// 新增辅助函数
+/// 合并/校验失败时的回退：把文件状态从 status=1 回退到 0 并清空分片进度，
+/// 删除残留的最终文件，让客户端下次重试时能从头重新上传，避免记录永久卡在 status=1。
+async fn rollback_finalize(db_pool: &SqlitePool, file_id: &str, final_file_path: &str) {
+    if let Err(e) = fs::remove_file(final_file_path).await {
+        // 最终文件可能尚未生成，忽略 NotFound
+        if e.kind() != std::io::ErrorKind::NotFound {
+            error!("Failed to remove final file {} during rollback: {}", final_file_path, e);
+        }
+    }
+    if let Err(e) = clear_upload_progress(db_pool, file_id).await {
+        error!("Failed to clear progress during rollback for {}: {}", file_id, e);
+    }
+    if let Err(e) = update_file_status_cas(db_pool, file_id, 1, 0).await {
+        error!("Failed to rollback status for {}: {}", file_id, e);
+    }
+}
+
 async fn merge_chunks(filename: &str, total_size: u64, chunk_size: u64) -> Result<(), String> {
     if chunk_size == 0 {
         return Err("Invalid chunk size".to_string());
@@ -685,7 +726,10 @@ pub async fn get_uploaded_files(
 ) -> impl IntoResponse {
     let page = query.page;
     let page_size = query.page_size;
-    let status = query.status;
+    // 已上传文件列表默认只统计「已完成」（status=2）的记录，
+    // 避免把上传中(0)/处理中(1)的僵尸记录混入总数与列表，导致数字对不齐。
+    // 客户端仍可通过显式传 status 查询其他状态。
+    let status = query.status.or(Some(2));
     let sort_by = query.sort_by.as_deref().unwrap_or("id");
     let order = query.order.as_deref().unwrap_or("asc");
     let source_device = query.source_device.as_deref();
