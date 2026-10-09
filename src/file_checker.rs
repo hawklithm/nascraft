@@ -11,7 +11,7 @@ use crate::upload_dao::update_file_thumbnail_path;
 /// 定期检查文件元信息是否发生变化
 /// 每隔10分钟检查一次uploads目录下的所有文件
 /// 优化：先检查文件元信息（mtime, ctime, ino），只有变化时才计算MD5
-pub async fn start_file_integrity_checker(db_pool: SqlitePool) {
+pub fn start_file_integrity_checker(db_pool: SqlitePool) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(600)); // 10分钟
 
