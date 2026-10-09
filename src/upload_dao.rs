@@ -199,6 +199,30 @@ pub struct UploadedFile {
     pub source_device: Option<String>,
 }
 
+const IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "gif", "webp", "bmp"];
+const VIDEO_EXTS: [&str; 8] = ["mp4", "webm", "mkv", "avi", "mov", "flv", "wmv", "m4v"];
+
+fn exts_like(exts: &[&str]) -> String {
+    exts.iter()
+        .map(|e| format!("lower(filename) LIKE '%.{}'", e))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// 根据媒体类型生成 SQL 筛选条件（image/video/other，白名单，无注入风险）
+fn media_type_condition(media_type: &str) -> String {
+    match media_type {
+        "image" => format!(" AND ({})", exts_like(&IMAGE_EXTS)),
+        "video" => format!(" AND ({})", exts_like(&VIDEO_EXTS)),
+        "other" => format!(
+            " AND NOT ({}) AND NOT ({})",
+            exts_like(&IMAGE_EXTS),
+            exts_like(&VIDEO_EXTS)
+        ),
+        _ => String::new(),
+    }
+}
+
 pub async fn fetch_uploaded_files(
     db_pool: &SqlitePool,
     page: u32,
@@ -207,6 +231,7 @@ pub async fn fetch_uploaded_files(
     sort_by: &str,
     order: &str,
     source_device: Option<&str>,
+    media_type: Option<&str>,
 ) -> Result<Vec<UploadedFile>, String> {
     let offset = (page - 1) * page_size;
     let mut query = String::from(
@@ -218,6 +243,9 @@ pub async fn fetch_uploaded_files(
     }
     if source_device.is_some() {
         query.push_str(" AND source_device = ?");
+    }
+    if let Some(mt) = media_type {
+        query.push_str(&media_type_condition(mt));
     }
 
     match sort_by {
@@ -256,6 +284,7 @@ pub async fn fetch_total_uploaded_files(
     db_pool: &SqlitePool,
     status: Option<i32>,
     source_device: Option<&str>,
+    media_type: Option<&str>,
 ) -> Result<i64, String> {
     let mut query_str = "SELECT COUNT(*) as total FROM upload_file_meta WHERE 1=1".to_string();
 
@@ -264,6 +293,9 @@ pub async fn fetch_total_uploaded_files(
     }
     if source_device.is_some() {
         query_str.push_str(" AND source_device = ?");
+    }
+    if let Some(mt) = media_type {
+        query_str.push_str(&media_type_condition(mt));
     }
 
     let mut q = sqlx::query(&query_str);

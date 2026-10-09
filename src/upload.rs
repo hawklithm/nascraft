@@ -650,6 +650,7 @@ pub struct Pagination {
     sort_by: Option<String>,
     order: Option<String>,
     source_device: Option<String>,
+    media_type: Option<String>,
 }
 
 pub async fn get_uploaded_files(
@@ -662,11 +663,12 @@ pub async fn get_uploaded_files(
     let sort_by = query.sort_by.as_deref().unwrap_or("id");
     let order = query.order.as_deref().unwrap_or("asc");
     let source_device = query.source_device.as_deref();
+    let media_type = query.media_type.as_deref();
 
 
     let db_pool = &ctx.app_state.db_pool;
 
-    let total_files = match fetch_total_uploaded_files(db_pool, status, source_device).await {
+    let total_files = match fetch_total_uploaded_files(db_pool, status, source_device, media_type).await {
         Ok(total) => total,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
             &e,
@@ -674,7 +676,7 @@ pub async fn get_uploaded_files(
         ))).into_response(),
     };
 
-    match fetch_uploaded_files(db_pool, page, page_size, status, sort_by, order, source_device).await {
+    match fetch_uploaded_files(db_pool, page, page_size, status, sort_by, order, source_device, media_type).await {
         Ok(mut files) => {
             // Add thumbnail_url for files that have a thumbnail
             for file in &mut files {
