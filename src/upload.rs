@@ -694,8 +694,8 @@ pub async fn get_uploaded_files(
 
     let db_pool = &ctx.app_state.db_pool;
 
-    let total_files = match fetch_total_uploaded_files(db_pool, status, source_device, media_type).await {
-        Ok(total) => total,
+    let (total_files, total_size) = match fetch_total_uploaded_files(db_pool, status, source_device, media_type).await {
+        Ok((count, size)) => (count, size),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
             &e,
             "FETCH_TOTAL_FILES_ERROR",
@@ -715,6 +715,7 @@ pub async fn get_uploaded_files(
                 "Fetched uploaded files successfully",
                 json!({
                     "total_files": total_files,
+                    "total_size": total_size,
                     "files": files
                 }),
             ))).into_response()

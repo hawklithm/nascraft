@@ -309,8 +309,8 @@ pub async fn fetch_total_uploaded_files(
     status: Option<i32>,
     source_device: Option<&str>,
     media_type: Option<&str>,
-) -> Result<i64, String> {
-    let mut query_str = "SELECT COUNT(*) as total FROM upload_file_meta WHERE 1=1".to_string();
+) -> Result<(i64, i64), String> {
+    let mut query_str = "SELECT COUNT(*) as total, COALESCE(SUM(total_size), 0) as total_size FROM upload_file_meta WHERE 1=1".to_string();
 
     if status.is_some() {
         query_str.push_str(" AND status = ?");
@@ -331,7 +331,11 @@ pub async fn fetch_total_uploaded_files(
     }
 
     match q.fetch_one(db_pool).await {
-        Ok(row) => Ok(row.get::<i64, _>("total")),
+        Ok(row) => {
+            let total: i64 = row.get("total");
+            let total_size: i64 = row.get("total_size");
+            Ok((total, total_size))
+        }
         Err(e) => {
             error!("Failed to fetch total uploaded files: {}", e);
             Err("Failed to fetch total uploaded files".to_string())
