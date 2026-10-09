@@ -10,7 +10,7 @@ use crate::dlna_renderer::{best_local_ipv4_for, build_didl_metadata, MediaRender
 use crate::download::{download_file, serve_thumbnail};
 use crate::ssdp::ssdp_routes;
 use crate::upload::{
-    get_uploaded_files, get_upload_status, submit_file_metadata, upload_file,
+    get_uploaded_files, get_upload_sources, get_upload_status, submit_file_metadata, upload_file,
 };
 use crate::helper::ApiResponse;
 
@@ -182,6 +182,7 @@ pub fn build_router(ctx: AppContext) -> Router {
         .route("/api/download/:file_id", get(download_file))
         .route("/api/thumbnail/:file_id", get(serve_thumbnail))
         .route("/api/uploaded_files", get(get_uploaded_files))
+        .route("/api/uploaded_files/sources", get(get_upload_sources))
         // Native DLNA renderer discovery and control API
         .route("/api/dlna/renderers", get(list_renderers))
         .route("/api/dlna/renderer/play", post(play_on_renderer))

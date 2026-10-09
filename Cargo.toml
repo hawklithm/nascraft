@@ -30,5 +30,6 @@ local-ip-address = "0.6"
 mime_guess = "2.0"
 mdns-sd = "0.17"
 image = { version = "0.24", features = ["webp"] }
+kamadak-exif = "0.6"
 [dev-dependencies]
 mockall = "0.13"

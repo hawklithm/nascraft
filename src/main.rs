@@ -13,6 +13,7 @@ mod udp_discovery;
 mod ssdp;
 mod file_checker;
 mod thumbnail;
+mod exif_parser;
 mod dlna_renderer;
 
 use crate::config::AppConfig;
@@ -25,6 +26,7 @@ use crate::server::serve_http;
 use crate::udp_discovery::{run_udp_discovery_responder, run_udp_broadcast_announcer};
 use crate::ssdp::{run_ssdp_responder, run_ssdp_announcer};
 use crate::file_checker::start_file_integrity_checker;
+use crate::exif_parser::start_exif_parser_worker;
 use crate::upload::AppState;
 use tracing::info;
 use std::env;
@@ -82,6 +84,10 @@ async fn main() -> std::io::Result<()> {
     info!("Starting file integrity checker (10-minute interval)");
 
     start_file_integrity_checker(app_state.db_pool.clone());
+
+    info!("Starting EXIF taken-at parser worker");
+
+    start_exif_parser_worker(app_state.db_pool.clone());
 
     println!("Starting server at http://0.0.0.0:{}", cfg.server_port);
 

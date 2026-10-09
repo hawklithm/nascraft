@@ -22,6 +22,8 @@ use md5::Md5;
 use crate::context::AppContext;
 use crate::thumbnail::{is_image_file, generate_thumbnail, ThumbnailConfig};
 use crate::upload_dao::update_file_thumbnail_path;
+use crate::upload_dao::fetch_distinct_source_devices;
+use crate::exif_parser::parse_and_store_taken_at;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -42,11 +44,12 @@ pub struct UploadState {
     pub filename: String,
     pub total_size: u64,
     pub checksum: String,
+    pub source_device: Option<String>,
 }
 
 impl UploadState {
     pub async fn save_to_db(&self, tx: &mut Transaction<'_, Sqlite>, file_path: &str) -> Result<(), String> {
-        save_upload_state_to_db(tx, &self.id, &self.filename, self.total_size, &self.checksum, file_path).await
+        save_upload_state_to_db(tx, &self.id, &self.filename, self.total_size, &self.checksum, self.source_device.as_deref(), file_path).await
     }
 }
 
@@ -336,6 +339,15 @@ pub async fn upload_file(
             }
         }
 
+        // 异步解析 EXIF 拍摄时间（不阻塞上传响应；后台 worker 也会定时兜底）
+        {
+            let pool = ctx.app_state.db_pool.clone();
+            let fid = file_id.clone();
+            tokio::spawn(async move {
+                parse_and_store_taken_at(&pool, &fid).await;
+            });
+        }
+
         (StatusCode::OK, Json(ApiResponse::success(
             "File upload completed successfully",
             json!({
@@ -365,6 +377,8 @@ pub struct FileMetadata {
     pub filename: String,
     pub total_size: u64,
     pub checksum: String,
+    #[serde(default)]
+    pub source_device: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -517,6 +531,7 @@ pub async fn submit_file_metadata(
         filename: safe_filename.clone(),
         total_size: metadata.total_size,
         checksum: metadata.checksum.clone(),
+        source_device: metadata.source_device.clone(),
     };
 
     // Start a transaction
@@ -634,6 +649,7 @@ pub struct Pagination {
     status: Option<i32>,
     sort_by: Option<String>,
     order: Option<String>,
+    source_device: Option<String>,
 }
 
 pub async fn get_uploaded_files(
@@ -645,11 +661,12 @@ pub async fn get_uploaded_files(
     let status = query.status;
     let sort_by = query.sort_by.as_deref().unwrap_or("id");
     let order = query.order.as_deref().unwrap_or("asc");
+    let source_device = query.source_device.as_deref();
 
 
     let db_pool = &ctx.app_state.db_pool;
 
-    let total_files = match fetch_total_uploaded_files(db_pool, status).await {
+    let total_files = match fetch_total_uploaded_files(db_pool, status, source_device).await {
         Ok(total) => total,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
             &e,
@@ -657,7 +674,7 @@ pub async fn get_uploaded_files(
         ))).into_response(),
     };
 
-    match fetch_uploaded_files(db_pool, page, page_size, status, sort_by, order).await {
+    match fetch_uploaded_files(db_pool, page, page_size, status, sort_by, order, source_device).await {
         Ok(mut files) => {
             // Add thumbnail_url for files that have a thumbnail
             for file in &mut files {
@@ -677,6 +694,24 @@ pub async fn get_uploaded_files(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
             &e,
             "FETCH_FILES_ERROR",
+        ))).into_response(),
+    }
+}
+
+/// 返回所有去重后的来源设备（用于客户端来源筛选器）
+pub async fn get_upload_sources(
+    State(ctx): State<AppContext>,
+) -> impl IntoResponse {
+    let db_pool = &ctx.app_state.db_pool;
+
+    match fetch_distinct_source_devices(db_pool).await {
+        Ok(sources) => (StatusCode::OK, Json(ApiResponse::success(
+            "Fetched source devices successfully",
+            json!({ "sources": sources }),
+        ))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(
+            &e,
+            "FETCH_SOURCES_ERROR",
         ))).into_response(),
     }
 }

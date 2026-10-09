@@ -133,16 +133,18 @@ pub async fn save_upload_state_to_db(
     filename: &str,
     total_size: u64,
     checksum: &str,
+    source_device: Option<&str>,
     file_path: &str,
 ) -> Result<(), String> {
     if let Err(e) = sqlx::query(
-        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum, file_path, file_mtime, file_ctime, file_ino) VALUES (?, ?, ?, ?, ?, 0, 0, 0)"
+        "INSERT INTO upload_file_meta (file_id, filename, total_size, checksum, file_path, source_device, file_mtime, file_ctime, file_ino) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0)"
     )
     .bind(file_id)
     .bind(filename)
     .bind(total_size as i64)
     .bind(checksum)
     .bind(file_path)
+    .bind(source_device)
     .execute(&mut **tx)
     .await
     {
@@ -190,6 +192,11 @@ pub struct UploadedFile {
     #[sqlx(default)]
     pub thumbnail_url: Option<String>,
     pub last_updated: i64,
+    #[sqlx(default)]
+    pub taken_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub source_device: Option<String>,
 }
 
 pub async fn fetch_uploaded_files(
@@ -199,19 +206,25 @@ pub async fn fetch_uploaded_files(
     status: Option<i32>,
     sort_by: &str,
     order: &str,
+    source_device: Option<&str>,
 ) -> Result<Vec<UploadedFile>, String> {
     let offset = (page - 1) * page_size;
-    let mut query = format!(
-        "SELECT file_id, filename, total_size, checksum, status, file_path, thumbnail_path, last_updated FROM upload_file_meta WHERE 1=1"
+    let mut query = String::from(
+        "SELECT file_id, filename, total_size, checksum, status, file_path, thumbnail_path, last_updated, taken_at, source_device FROM upload_file_meta WHERE 1=1"
     );
 
-    if let Some(status) = status {
-        query.push_str(&format!(" AND status = {}", status));
+    if status.is_some() {
+        query.push_str(" AND status = ?");
+    }
+    if source_device.is_some() {
+        query.push_str(" AND source_device = ?");
     }
 
     match sort_by {
         "size" => query.push_str(" ORDER BY total_size"),
         "date" => query.push_str(" ORDER BY last_updated"),
+        // 拍摄时间：未解析(taken_at=0)的排最后，其余按拍摄时间排序
+        "taken_at" => query.push_str(" ORDER BY CASE WHEN taken_at = 0 THEN 1 ELSE 0 END ASC, taken_at"),
         _ => query.push_str(" ORDER BY id"), // Default sorting by id
     }
 
@@ -222,10 +235,15 @@ pub async fn fetch_uploaded_files(
 
     query.push_str(&format!(" LIMIT {} OFFSET {}", page_size, offset));
 
-    match sqlx::query_as::<_, UploadedFile>(&query)
-        .fetch_all(db_pool)
-        .await
-    {
+    let mut q = sqlx::query_as::<_, UploadedFile>(&query);
+    if let Some(s) = status {
+        q = q.bind(s);
+    }
+    if let Some(sd) = source_device {
+        q = q.bind(sd);
+    }
+
+    match q.fetch_all(db_pool).await {
         Ok(files) => Ok(files),
         Err(e) => {
             error!("Failed to fetch uploaded files: {}", e);
@@ -234,21 +252,56 @@ pub async fn fetch_uploaded_files(
     }
 }
 
-pub async fn fetch_total_uploaded_files(db_pool: &SqlitePool, status: Option<i32>) -> Result<i64, String> {
+pub async fn fetch_total_uploaded_files(
+    db_pool: &SqlitePool,
+    status: Option<i32>,
+    source_device: Option<&str>,
+) -> Result<i64, String> {
     let mut query_str = "SELECT COUNT(*) as total FROM upload_file_meta WHERE 1=1".to_string();
 
-    if let Some(status) = status {
-        query_str.push_str(&format!(" AND status = {}", status));
+    if status.is_some() {
+        query_str.push_str(" AND status = ?");
+    }
+    if source_device.is_some() {
+        query_str.push_str(" AND source_device = ?");
     }
 
-    match sqlx::query(&query_str)
-        .fetch_one(db_pool)
-        .await
-    {
+    let mut q = sqlx::query(&query_str);
+    if let Some(s) = status {
+        q = q.bind(s);
+    }
+    if let Some(sd) = source_device {
+        q = q.bind(sd);
+    }
+
+    match q.fetch_one(db_pool).await {
         Ok(row) => Ok(row.get::<i64, _>("total")),
         Err(e) => {
             error!("Failed to fetch total uploaded files: {}", e);
             Err("Failed to fetch total uploaded files".to_string())
+        }
+    }
+}
+
+/// 查询所有去重后的来源设备（用于客户端筛选器）
+pub async fn fetch_distinct_source_devices(db_pool: &SqlitePool) -> Result<Vec<String>, String> {
+    match sqlx::query(
+        "SELECT DISTINCT source_device FROM upload_file_meta WHERE source_device IS NOT NULL AND source_device != '' ORDER BY source_device"
+    )
+    .fetch_all(db_pool)
+    .await
+    {
+        Ok(rows) => {
+            let mut result = Vec::with_capacity(rows.len());
+            for row in rows {
+                let source: String = row.get("source_device");
+                result.push(source);
+            }
+            Ok(result)
+        }
+        Err(e) => {
+            error!("Failed to fetch distinct source devices: {}", e);
+            Err("Failed to fetch distinct source devices".to_string())
         }
     }
 }
@@ -393,7 +446,7 @@ pub async fn cleanup_zombie_uploads(db_pool: &SqlitePool, staleness_days: i64) -
 /// Fetch a complete UploadedFile by file_id
 pub async fn fetch_uploaded_file_by_id(db_pool: &SqlitePool, file_id: &str) -> Result<Option<UploadedFile>, String> {
     match sqlx::query_as::<_, UploadedFile>(
-        "SELECT file_id, filename, total_size, checksum, status, file_path, thumbnail_path, last_updated FROM upload_file_meta WHERE file_id = ?"
+        "SELECT file_id, filename, total_size, checksum, status, file_path, thumbnail_path, last_updated, taken_at, source_device FROM upload_file_meta WHERE file_id = ?"
     )
     .bind(file_id)
     .fetch_optional(db_pool)
@@ -423,5 +476,48 @@ pub async fn update_file_thumbnail_path(
     {
         Ok(_) => Ok(()),
         Err(e) => Err(format!("Failed to update file thumbnail path: {}", e)),
+    }
+}
+
+/// 查询已完成但尚未解析 EXIF 拍摄时间的文件（返回 file_id, file_path）
+pub async fn fetch_files_needing_exif_parse(
+    db_pool: &SqlitePool,
+) -> Result<Vec<(String, String)>, String> {
+    match sqlx::query(
+        "SELECT file_id, file_path FROM upload_file_meta WHERE status = 2 AND exif_parsed = 0 AND file_path IS NOT NULL AND file_path != ''",
+    )
+    .fetch_all(db_pool)
+    .await
+    {
+        Ok(rows) => {
+            let mut result = Vec::with_capacity(rows.len());
+            for row in rows {
+                let file_id: String = row.get("file_id");
+                let file_path: String = row.get("file_path");
+                result.push((file_id, file_path));
+            }
+            Ok(result)
+        }
+        Err(e) => {
+            error!("Failed to fetch files needing exif parse: {}", e);
+            Err("Failed to fetch files needing exif parse".to_string())
+        }
+    }
+}
+
+/// 写入文件的拍摄时间并标记已解析
+pub async fn update_file_taken_at(
+    db_pool: &SqlitePool,
+    file_id: &str,
+    taken_at: i64,
+) -> Result<(), String> {
+    match sqlx::query("UPDATE upload_file_meta SET taken_at = ?, exif_parsed = 1 WHERE file_id = ?")
+        .bind(taken_at)
+        .bind(file_id)
+        .execute(db_pool)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Failed to update file taken_at: {}", e)),
     }
 }
