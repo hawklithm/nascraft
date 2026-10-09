@@ -80,6 +80,33 @@ async fn check_and_update_file_integrity(db_pool: &SqlitePool) -> Result<(), Str
             continue;
         }
 
+        // 补生成缺失的缩略图（与文件元信息是否变化无关）。
+        // 视频上传时缩略图是后台生成，若当时 ffmpeg 未就绪会静默失败，
+        // 这里在每次巡检中对缺失缩略图的图片/视频无条件补一次。
+        if stored_thumbnail_path.is_none() {
+            if is_image_file(&filename) {
+                info!("Generating thumbnail for existing image: {} (file_id: {})", filename, file_id);
+                if let Some(thumbnail_path) = generate_thumbnail(&thumbnail_config, &file_path, &stored_checksum).await {
+                    if let Err(e) = update_file_thumbnail_path(db_pool, &file_id, &thumbnail_path).await {
+                        error!("Failed to save thumbnail path for existing image: {}", e);
+                    } else {
+                        info!("Thumbnail generated for existing image: {} (file_id: {})", filename, file_id);
+                        thumbnails_generated_count += 1;
+                    }
+                }
+            } else if is_video_file(&filename) {
+                info!("Generating thumbnail for existing video: {} (file_id: {})", filename, file_id);
+                if let Some(thumbnail_path) = generate_video_thumbnail(&thumbnail_config, &file_path, &stored_checksum).await {
+                    if let Err(e) = update_file_thumbnail_path(db_pool, &file_id, &thumbnail_path).await {
+                        error!("Failed to save thumbnail path for existing video: {}", e);
+                    } else {
+                        info!("Thumbnail generated for existing video: {} (file_id: {})", filename, file_id);
+                        thumbnails_generated_count += 1;
+                    }
+                }
+            }
+        }
+
         // 获取当前文件的元信息
         let current_meta = match get_filesystem_meta(&file_path).await {
             Ok(meta) => meta,
@@ -174,31 +201,6 @@ async fn check_and_update_file_integrity(db_pool: &SqlitePool) -> Result<(), Str
             } else {
                 info!("Updated meta info for unchanged file: {} (file_id: {})", filename, file_id);
                 meta_updated_count += 1;
-            }
-        }
-
-        // Generate thumbnail if image/video file and no thumbnail exists
-        if stored_thumbnail_path.is_none() {
-            if is_image_file(&filename) {
-                info!("Generating thumbnail for existing image: {} (file_id: {})", filename, file_id);
-                if let Some(thumbnail_path) = generate_thumbnail(&thumbnail_config, &file_path, &stored_checksum).await {
-                    if let Err(e) = update_file_thumbnail_path(db_pool, &file_id, &thumbnail_path).await {
-                        error!("Failed to save thumbnail path for existing image: {}", e);
-                    } else {
-                        info!("Thumbnail generated for existing image: {} (file_id: {})", filename, file_id);
-                        thumbnails_generated_count += 1;
-                    }
-                }
-            } else if is_video_file(&filename) {
-                info!("Generating thumbnail for existing video: {} (file_id: {})", filename, file_id);
-                if let Some(thumbnail_path) = generate_video_thumbnail(&thumbnail_config, &file_path, &stored_checksum).await {
-                    if let Err(e) = update_file_thumbnail_path(db_pool, &file_id, &thumbnail_path).await {
-                        error!("Failed to save thumbnail path for existing video: {}", e);
-                    } else {
-                        info!("Thumbnail generated for existing video: {} (file_id: {})", filename, file_id);
-                        thumbnails_generated_count += 1;
-                    }
-                }
             }
         }
     }
