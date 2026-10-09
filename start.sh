@@ -150,6 +150,9 @@ start_service() {
         return 1
     fi
 
+    # 确保 ffmpeg 可用（视频缩略图依赖），并写 FFMPEG_PATH 到 .env
+    ensure_ffmpeg
+
     info "正在后台启动 Nascraft..."
     cd "$SCRIPT_DIR"
     nohup ./nascraft >> "$LOG_FILE" 2>&1 &
@@ -209,6 +212,146 @@ remove_cron() {
     rm -f "$temp_cron"
 
     info "cron 保活任务已移除"
+}
+
+# 检测操作系统类型
+detect_os() {
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
+        Linux) echo "linux" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# 检测 Linux 包管理器
+detect_pkg_manager() {
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "apt"
+    elif command -v dnf >/dev/null 2>&1; then
+        echo "dnf"
+    elif command -v yum >/dev/null 2>&1; then
+        echo "yum"
+    elif command -v apk >/dev/null 2>&1; then
+        echo "apk"
+    elif command -v pacman >/dev/null 2>&1; then
+        echo "pacman"
+    elif command -v zypper >/dev/null 2>&1; then
+        echo "zypper"
+    else
+        echo "unknown"
+    fi
+}
+
+# 写入/更新 .env 中的某个 key=value（POSIX sh，兼容路径含 /）
+set_env_key() {
+    key="$1"
+    value="$2"
+    if [ ! -f "$ENV_FILE" ]; then
+        touch "$ENV_FILE"
+    fi
+    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+        temp_env=$(mktemp)
+        sed "s|^${key}=.*|${key}=${value}|" "$ENV_FILE" > "$temp_env"
+        mv "$temp_env" "$ENV_FILE"
+    else
+        echo "${key}=${value}" >> "$ENV_FILE"
+    fi
+}
+
+# 按平台自动安装 ffmpeg（失败不阻断，仅告警）
+install_ffmpeg() {
+    os=$(detect_os)
+    case "$os" in
+        macos)
+            if command -v brew >/dev/null 2>&1; then
+                info "使用 Homebrew 安装 ffmpeg（可能需要几分钟）..."
+                brew install ffmpeg || warn "brew install ffmpeg 失败，请手动安装"
+            else
+                warn "未检测到 Homebrew，请先安装 Homebrew 后手动执行: brew install ffmpeg"
+            fi
+            ;;
+        linux)
+            pkg=$(detect_pkg_manager)
+            case "$pkg" in
+                apt)
+                    if [ "$(id -u)" -eq 0 ]; then
+                        apt-get update >/dev/null 2>&1 && apt-get install -y ffmpeg >/dev/null 2>&1 || warn "apt 安装 ffmpeg 失败"
+                    else
+                        sudo -n apt-get install -y ffmpeg >/dev/null 2>&1 || warn "需要 sudo 权限安装 ffmpeg，请手动执行: sudo apt-get install -y ffmpeg"
+                    fi
+                    ;;
+                dnf)
+                    if [ "$(id -u)" -eq 0 ]; then
+                        dnf install -y ffmpeg >/dev/null 2>&1 || warn "dnf 安装 ffmpeg 失败"
+                    else
+                        sudo -n dnf install -y ffmpeg >/dev/null 2>&1 || warn "请手动执行: sudo dnf install -y ffmpeg"
+                    fi
+                    ;;
+                yum)
+                    if [ "$(id -u)" -eq 0 ]; then
+                        yum install -y ffmpeg >/dev/null 2>&1 || warn "yum 安装 ffmpeg 失败"
+                    else
+                        sudo -n yum install -y ffmpeg >/dev/null 2>&1 || warn "请手动执行: sudo yum install -y ffmpeg"
+                    fi
+                    ;;
+                apk)
+                    apk add --no-cache ffmpeg >/dev/null 2>&1 || warn "apk 安装 ffmpeg 失败"
+                    ;;
+                pacman)
+                    if [ "$(id -u)" -eq 0 ]; then
+                        pacman -S --noconfirm ffmpeg >/dev/null 2>&1 || warn "pacman 安装 ffmpeg 失败"
+                    else
+                        sudo -n pacman -S --noconfirm ffmpeg >/dev/null 2>&1 || warn "请手动执行: sudo pacman -S ffmpeg"
+                    fi
+                    ;;
+                *)
+                    warn "未识别的 Linux 包管理器，请手动安装 ffmpeg"
+                    ;;
+            esac
+            ;;
+        *)
+            warn "未知操作系统，请手动安装 ffmpeg 并在 .env 中设置 FFMPEG_PATH"
+            ;;
+    esac
+}
+
+# 确保 ffmpeg 可用：检测 → 自动安装 → 写 FFMPEG_PATH 到 .env
+# 写绝对路径是为了让 cron 保活（PATH 精简）下服务端也能精确定位 ffmpeg
+ensure_ffmpeg() {
+    ffmpeg_bin=""
+
+    # 1. 优先使用 .env 里已配置的 FFMPEG_PATH
+    if [ -f "$ENV_FILE" ]; then
+        configured_ffmpeg=$(grep '^FFMPEG_PATH=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+        if [ -n "$configured_ffmpeg" ] && [ -x "$configured_ffmpeg" ]; then
+            ffmpeg_bin="$configured_ffmpeg"
+        fi
+    fi
+
+    # 2. 尝试 PATH
+    if [ -z "$ffmpeg_bin" ]; then
+        ffmpeg_bin=$(command -v ffmpeg 2>/dev/null || true)
+    fi
+
+    # 3. 都没有 → 自动安装
+    if [ -z "$ffmpeg_bin" ]; then
+        warn "未检测到 ffmpeg（视频缩略图需要它），尝试自动安装..."
+        install_ffmpeg
+        ffmpeg_bin=$(command -v ffmpeg 2>/dev/null || true)
+    fi
+
+    # 4. 写入/更新 FFMPEG_PATH（仅在变化时写，避免每次保活重写 .env）
+    if [ -n "$ffmpeg_bin" ]; then
+        current_env=$(grep '^FFMPEG_PATH=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+        if [ "$current_env" != "$ffmpeg_bin" ]; then
+            set_env_key "FFMPEG_PATH" "$ffmpeg_bin"
+            info "已设置 FFMPEG_PATH=$ffmpeg_bin"
+        else
+            info "ffmpeg 就绪: $ffmpeg_bin"
+        fi
+    else
+        warn "ffmpeg 不可用，视频缩略图功能将不可用（不影响其他功能）"
+    fi
 }
 
 # 保活检查
@@ -294,6 +437,9 @@ configure() {
         echo ""
         echo "# Optional: UDP 发现端口"
         echo "# NASCRAFT_UDP_DISCOVERY_PORT=53530"
+        echo ""
+        echo "# ffmpeg 路径（视频缩略图用，start.sh 会自动检测并填写）"
+        echo "# FFMPEG_PATH=/usr/bin/ffmpeg"
     } > "$ENV_FILE"
 
     # 创建必要的目录
