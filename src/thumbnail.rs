@@ -148,10 +148,12 @@ pub async fn generate_video_thumbnail(
     let ffmpeg_path = env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".to_string());
     let ffmpeg_path_log = ffmpeg_path.clone();
     let input = original_path.to_string();
+    let input_log = input.clone();
     let output = thumbnail_path.clone();
     // 宽度不超过 max_size 且不放大（min），高度按比例取偶（-2）
     let scale_filter = format!("scale='min({},iw)':-2", config.max_size);
 
+    // 捕获 stderr 以便失败时定位原因（此前被丢弃，导致缩略图失败无迹可查）
     let result = tokio::task::spawn_blocking(move || {
         Command::new(&ffmpeg_path)
             .arg("-y")
@@ -162,12 +164,11 @@ pub async fn generate_video_thumbnail(
             .arg("-f").arg("webp")
             .arg(&output)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
+            .output()
     }).await;
 
     match result {
-        Ok(Ok(status)) if status.success() => {
+        Ok(Ok(output)) if output.status.success() => {
             if fs::metadata(&thumbnail_path).await.is_ok() {
                 info!("Video thumbnail generated: {}", thumbnail_path);
                 Some(thumbnail_path)
@@ -176,8 +177,16 @@ pub async fn generate_video_thumbnail(
                 None
             }
         }
-        Ok(Ok(status)) => {
-            error!("ffmpeg exited with status {} for {}", status, original_path);
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr_trimmed: String = stderr.chars().take(800).collect();
+            error!(
+                "ffmpeg failed (exit {:?}) for {} (ffmpeg={}): {}",
+                output.status.code(),
+                input_log,
+                ffmpeg_path_log,
+                stderr_trimmed
+            );
             None
         }
         Ok(Err(e)) => {
