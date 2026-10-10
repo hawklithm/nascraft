@@ -749,8 +749,9 @@ pub async fn get_uploaded_files(
     match fetch_uploaded_files(db_pool, page, page_size, status, sort_by, order, source_device, media_type).await {
         Ok(mut files) => {
             // Add thumbnail_url for files that have a thumbnail
+            // （缩略图路径为空字符串时也视为无缩略图，避免客户端拿到一个必然 404 的 URL）
             for file in &mut files {
-                if file.thumbnail_path.is_some() {
+                if file.thumbnail_path.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
                     file.thumbnail_url = Some(format!("/api/thumbnail/{}", file.file_id));
                 }
             }

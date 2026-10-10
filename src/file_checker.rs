@@ -72,6 +72,12 @@ async fn check_and_update_file_integrity(db_pool: &SqlitePool) -> Result<(), Str
         let stored_ctime: i64 = row.get("file_ctime");
         let stored_ino: i64 = row.get("file_ino");
         let stored_thumbnail_path: Option<String> = row.try_get("thumbnail_path").ok();
+        // NULL 或空字符串都视为「无缩略图」：旧数据可能存在 thumbnail_path='' 的记录，
+        // 若只用 is_none() 判断，'' 会被误判为已有缩略图而跳过补生成。
+        let needs_thumbnail = stored_thumbnail_path
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
 
         // 检查文件是否存在
         if !fs::try_exists(&file_path).await.unwrap_or(false) {
@@ -83,7 +89,7 @@ async fn check_and_update_file_integrity(db_pool: &SqlitePool) -> Result<(), Str
         // 补生成缺失的缩略图（与文件元信息是否变化无关）。
         // 视频上传时缩略图是后台生成，若当时 ffmpeg 未就绪会静默失败，
         // 这里在每次巡检中对缺失缩略图的图片/视频无条件补一次。
-        if stored_thumbnail_path.is_none() {
+        if needs_thumbnail {
             if is_image_file(&filename) {
                 info!("Generating thumbnail for existing image: {} (file_id: {})", filename, file_id);
                 if let Some(thumbnail_path) = generate_thumbnail(&thumbnail_config, &file_path, &stored_checksum).await {
